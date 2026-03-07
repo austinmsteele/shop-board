@@ -121,6 +121,29 @@ function writeAppDataSnapshot(snapshot, filePath = appDataPath) {
   return appDataWriteChain;
 }
 
+async function resolveAnonymousSnapshot(db) {
+  const sharedSnapshot = await readAppDataSnapshot();
+  if (boardSnapshotHasBoards(sharedSnapshot)) {
+    return sharedSnapshot;
+  }
+  const template = resolveProvisioningTemplate(db, '');
+  if (!template) {
+    return sharedSnapshot;
+  }
+  const templateBoard = safeJsonParse(template.board_json || '{}', {});
+  if (!templateBoard || typeof templateBoard !== 'object' || Array.isArray(templateBoard)) {
+    return sharedSnapshot;
+  }
+  const normalizedBoard = cloneJson(templateBoard, {}) || {};
+  const normalizedName = String(normalizedBoard.name || '').trim();
+  if (!normalizedName) {
+    normalizedBoard.name = String(template.title || DEFAULT_DEMO_BOARD_NAME).trim() || DEFAULT_DEMO_BOARD_NAME;
+  }
+  return normalizeAppDataSnapshot({
+    boards: [normalizedBoard]
+  });
+}
+
 function runMigrations(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -4838,8 +4861,8 @@ export function createServer({ databasePath = dbPath } = {}) {
           } else if (authContext.sessionToken) {
             appendSetCookieHeader(res, createClearSessionCookie(req));
           }
-          const sharedSnapshot = await readAppDataSnapshot();
-          respondJson(res, 200, sharedSnapshot);
+          const anonymousSnapshot = await resolveAnonymousSnapshot(db);
+          respondJson(res, 200, anonymousSnapshot);
           return;
         }
         if (method === 'PUT') {
