@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ShopBoard</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="shortcut icon" href="/favicon.svg" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <section id="beta-gate" class="beta-gate hidden" aria-live="polite">
+      <div class="beta-gate-glow beta-gate-glow-left" aria-hidden="true"></div>
+      <div class="beta-gate-glow beta-gate-glow-right" aria-hidden="true"></div>
+      <article class="beta-gate-card">
+        <p class="beta-wordmark" aria-label="ShopBoard">ShopBoard</p>
+        <h1 class="beta-headline">Welcome to ShopBoard</h1>
+        <p class="beta-copy">
+          ShopBoard helps you collect options, compare them side-by-side, add feedback, rank and rate items, and make better decisions with friends or family.
+        </p>
+        <p class="beta-copy">
+          This is an early beta. Some features are still being built and things may occasionally break — your feedback will help shape the product.
+        </p>
+        <p class="beta-copy">
+          By entering, you acknowledge this is a private beta and agree not to copy, reproduce, or distribute the concept or software.
+        </p>
+        <p class="beta-copy beta-thanks">Thanks for helping test ShopBoard.</p>
+
+        <div id="beta-intro-actions" class="beta-intro-actions">
+          <button id="beta-enter-btn" class="beta-enter-btn" type="button">Enter</button>
+        </div>
+
+        <p id="beta-gate-status" class="beta-gate-status hidden" aria-live="polite"></p>
+      </article>
+    </section>
+
+    <main id="app-shell" class="app-shell hidden">
+      <section id="home-screen">
+        <div id="home-auth-bar" class="home-auth-bar">
+          <button id="home-auth-btn" class="home-auth-btn" type="button">Sign Up / Log In</button>
+        </div>
+        <section class="home-hero">
+          <h1 class="home-title">Shop Board</h1>
+        </section>
+
+        <section class="boards-wall">
+          <div id="boards-grid" class="boards-grid"></div>
+        </section>
+      </section>
+
+      <section id="board-screen" class="hidden">
+        <section class="board-topbar">
+          <div class="board-toolbar-row">
+            <button id="back-home-btn" class="ghost-btn" type="button">Back To Boards</button>
+          </div>
+        </section>
+
+        <section class="panel board-title-panel">
+          <div id="board-title-wrap" class="board-title-wrap">
+            <h2 id="board-title" class="board-title-main" role="button" tabindex="0" aria-label="Edit board name">Board</h2>
+          </div>
+          <input id="board-title-input" class="board-title-input hidden" type="text" maxlength="80" autocomplete="new-password" autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="text" data-lpignore="true" data-1p-ignore="true" />
+        </section>
+
+        <section class="panel" id="add-item-panel">
+          <form id="add-form" class="link-form">
+            <p class="add-item-heading">Add Item</p>
+            <div class="input-row">
+              <input
+                id="product-url"
+                name="url"
+                type="text"
+                placeholder="Paste any URL here"
+                autocomplete="new-password"
+                autocorrect="off"
+                autocapitalize="none"
+                spellcheck="false"
+                inputmode="url"
+                data-lpignore="true"
+                data-1p-ignore="true"
+                required
+              />
+              <select id="add-category-select" name="category">
+                <option value="__placeholder__" selected disabled hidden>Category</option>
+                <option value="__auto__">Auto-Categorize</option>
+              </select>
+              <button type="submit" id="add-btn">Add</button>
+            </div>
+          </form>
+          <section id="extracting-overlay" class="extracting-overlay hidden" aria-live="polite">
+            <div class="extracting-box">
+              <p class="extracting-title">Extracting</p>
+              <div class="spinner" aria-hidden="true"></div>
+              <p class="extracting-subtitle">This may take a minute</p>
+              <button id="cancel-extract-btn" class="cancel-extract-btn" type="button">Cancel</button>
+            </div>
+          </section>
+        </section>
+
+        <section class="board-map-row">
+          <div id="category-breadcrumbs" class="category-breadcrumbs"></div>
+        </section>
+
+        <section class="list-view-head">
+          <div id="board-view-controls" aria-label="Board view controls"></div>
+          <div class="add-category-actions-inline">
+            <button id="add-category-btn" type="button" class="ghost-btn add-category-btn">Add Category</button>
+          </div>
+        </section>
+
+        <section class="panel category-panel hidden" id="category-panel">
+          <div id="category-children" class="category-children"></div>
+        </section>
+
+        <section class="panel" id="list-view-section">
+          <div class="table-wrap">
+            <table id="items-table">
+              <colgroup>
+                <col class="col-image" />
+                <col class="col-name" />
+                <col class="col-seller" />
+                <col class="col-price" />
+                <col class="col-highlights" />
+                <col class="col-feedback" />
+              </colgroup>
+              <thead>
+                <tr id="items-head-row">
+                  <th>Image</th>
+                  <th>Item Name</th>
+                  <th>Seller (Website)</th>
+                  <th>Price</th>
+                  <th>Highlights</th>
+                  <th>Feedback</th>
+                </tr>
+              </thead>
+              <tbody id="items-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel hidden" id="image-view-section">
+          <div id="cards-grid" class="cards-grid"></div>
+        </section>
+      </section>
+    </main>
+
+    <template id="board-card-template">
+      <article class="board-card">
+        <button class="board-open-btn" type="button">
+          <div class="board-preview-grid">
+            <div class="preview-main"></div>
+            <div class="preview-side preview-side-top"></div>
+            <div class="preview-side preview-side-bottom"></div>
+          </div>
+          <div class="board-meta">
+            <h3 class="board-name"></h3>
+            <p class="board-count"></p>
+          </div>
+        </button>
+        <div class="board-card-actions" aria-label="Board actions">
+          <button class="board-actions-toggle" type="button" aria-label="Board actions" aria-haspopup="true" aria-expanded="false">...</button>
+          <div class="board-actions-menu" hidden>
+            <button class="board-menu-edit" type="button"><span class="board-menu-icon">✎</span><span>Edit</span></button>
+            <button class="board-menu-share" type="button"><span class="board-menu-icon">↗</span><span>Share</span></button>
+            <button class="board-menu-delete" type="button"><span class="board-menu-icon">🗑</span><span>Delete</span></button>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <template id="new-board-tile-template">
+      <article class="board-card new-board-card">
+        <button class="new-board-btn" type="button">+ New Board</button>
+      </article>
+    </template>
+
+    <dialog id="new-board-dialog" class="new-board-dialog">
+      <form id="new-board-form" method="dialog" class="new-board-form" autocomplete="off">
+        <h2 id="new-board-title">New Board Name</h2>
+        <label>
+          <span id="new-board-label">Board Name</span>
+          <input id="new-board-input" type="text" maxlength="80" autocomplete="new-password" autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="text" data-lpignore="true" data-1p-ignore="true" required />
+        </label>
+        <menu>
+          <button id="new-board-cancel-btn" type="button" class="cancel-btn">Cancel</button>
+          <button id="new-board-save-btn" type="submit">Create</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="board-edit-dialog" class="board-edit-dialog">
+      <form id="board-edit-form" method="dialog" class="board-edit-form">
+        <h2>Edit Board</h2>
+        <label class="board-edit-label">
+          <span class="board-edit-label-text">Board Name</span>
+          <input id="board-edit-name" name="boardName" type="text" maxlength="80" autocomplete="new-password" autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="text" data-lpignore="true" data-1p-ignore="true" />
+        </label>
+        <div class="board-edit-section">
+          <p class="board-edit-section-title">Board Covers</p>
+          <div class="board-edit-preview-grid">
+            <button class="board-edit-preview-slot board-edit-preview-slot-main" type="button" data-board-edit-slot="0">
+              <span>Main Image</span>
+            </button>
+            <div class="board-edit-preview-sides">
+              <button class="board-edit-preview-slot board-edit-preview-slot-side" type="button" data-board-edit-slot="1">
+                <span>Top Side</span>
+              </button>
+              <button class="board-edit-preview-slot board-edit-preview-slot-side" type="button" data-board-edit-slot="2">
+                <span>Bottom Side</span>
+              </button>
+            </div>
+          </div>
+          <div class="board-edit-preview-actions">
+            <button id="board-edit-reset-btn" class="ghost-btn board-edit-reset-btn" type="button">Reset to automatic</button>
+            <p class="board-edit-hint">Pick a slot first, then choose one of the featured images below.</p>
+          </div>
+        </div>
+        <div class="board-edit-section">
+          <p class="board-edit-section-title">Featured Images</p>
+          <div id="board-edit-candidates" class="board-edit-candidates" role="list"></div>
+        </div>
+        <menu class="board-edit-actions">
+          <button id="board-edit-cancel-btn" type="button" class="ghost-btn">Cancel</button>
+          <button type="submit">Save</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <template id="row-template">
+      <tr>
+        <td class="image-cell"></td>
+        <td class="name-cell"></td>
+        <td class="seller-cell"></td>
+        <td class="price-cell"></td>
+        <td class="highlights-cell">
+          <div class="row-hover-actions" aria-label="Item actions">
+            <button class="row-rank-btn icon-btn rank-btn" type="button" aria-label="Set medal rank">🏅</button>
+            <button class="row-open-btn icon-btn" type="button" aria-label="Open website">🌐</button>
+            <button class="row-remove-btn icon-btn danger" type="button" aria-label="Remove item">🗑</button>
+          </div>
+        </td>
+        <td class="feedback-cell"></td>
+      </tr>
+    </template>
+
+    <template id="card-template">
+      <article class="item-card">
+        <div class="card-image-wrap">
+          <img class="card-image" alt="" loading="lazy" />
+        </div>
+        <div class="card-body">
+          <a class="card-title" target="_blank" rel="noopener noreferrer"></a>
+          <div class="card-meta">
+            <span class="card-seller"></span>
+          </div>
+          <div class="card-price-row">
+            <span class="card-price-value"></span>
+          </div>
+          <ul class="card-highlights"></ul>
+          <div class="card-hover-actions" aria-label="Item actions">
+            <button class="card-rank-btn icon-btn rank-btn" type="button" aria-label="Set medal rank">🏅</button>
+            <button class="card-open-btn icon-btn" type="button" aria-label="Open website">🌐</button>
+            <button class="card-remove-btn icon-btn danger" type="button" aria-label="Remove item">🗑</button>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <dialog id="edit-dialog" class="edit-dialog">
+      <form id="edit-form" method="dialog" class="edit-form">
+        <h2>Edit Item</h2>
+        <label>
+          Brand
+          <input id="edit-brand" type="text" autocomplete="new-password" autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="text" data-lpignore="true" data-1p-ignore="true" />
+        </label>
+        <label>
+          Item Name
+          <input id="edit-description" type="text" autocomplete="new-password" autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="text" data-lpignore="true" data-1p-ignore="true" required />
+        </label>
+        <label>
+          Seller (Website)
+          <input id="edit-seller" type="text" autocomplete="new-password" autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="text" data-lpignore="true" data-1p-ignore="true" />
+        </label>
+        <label>
+          Price
+          <input id="edit-price" type="text" autocomplete="new-password" autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="decimal" data-lpignore="true" data-1p-ignore="true" />
+        </label>
+        <label>
+          Image URL
+          <input id="edit-image" type="url" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="url" data-lpignore="true" data-1p-ignore="true" />
+        </label>
+        <label>
+          Highlights (1 per line, keep minimal)
+          <textarea id="edit-highlights" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" data-lpignore="true" data-1p-ignore="true"></textarea>
+        </label>
+        <menu>
+          <button type="button" id="edit-cancel-btn" class="cancel-btn">Cancel</button>
+          <button type="submit" id="edit-save-btn">Save</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="detail-dialog" class="detail-dialog">
+      <article class="detail-modal">
+        <button id="detail-close-btn" class="detail-close-btn" type="button" aria-label="Close details">×</button>
+        <section class="detail-media">
+          <button id="detail-prev-btn" class="detail-nav-btn hidden" type="button" aria-label="Previous image">‹</button>
+          <div class="detail-media-center">
+            <div class="detail-main-image-wrap">
+              <img id="detail-main-image" class="detail-main-image" alt="" />
+              <div id="detail-main-empty" class="detail-main-empty hidden">No image</div>
+              <div class="detail-main-actions">
+                <button id="detail-delete-btn" class="detail-delete-btn hidden" type="button" aria-label="Delete image">🗑</button>
+                <button id="detail-featured-btn" class="detail-featured-btn hidden" type="button" aria-label="Set as featured image">☆</button>
+              </div>
+            </div>
+            <div class="detail-thumbs-row">
+              <div id="detail-thumbs" class="detail-thumbs"></div>
+              <button id="detail-add-image-btn" type="button" class="detail-thumb detail-thumb-add" aria-label="Add image">+</button>
+            </div>
+          </div>
+          <button id="detail-next-btn" class="detail-nav-btn hidden" type="button" aria-label="Next image">›</button>
+        </section>
+        <section class="detail-info">
+          <h2 id="detail-name" class="detail-name"></h2>
+          <a id="detail-link" class="detail-link" target="_blank" rel="noopener noreferrer">View product</a>
+          <p id="detail-price" class="detail-price"></p>
+          <section id="detail-meta" class="detail-meta">
+            <div id="detail-dynamic-sections" class="detail-dynamic-sections"></div>
+          </section>
+          <section class="detail-feedback">
+            <h4>Add Feedback</h4>
+            <div id="detail-feedback-composer" class="detail-feedback-composer">
+              <label class="detail-feedback-label">
+                <input
+                  id="detail-feedback-input"
+                  type="text"
+                  maxlength="200"
+                  placeholder="Type feedback..."
+                  autocomplete="off"
+                  autocorrect="off"
+                  autocapitalize="none"
+                  spellcheck="false"
+                  inputmode="text"
+                  data-lpignore="true"
+                  data-1p-ignore="true"
+                />
+              </label>
+              <div id="detail-feedback-emoji-grid" class="detail-feedback-emoji-grid"></div>
+              <div class="detail-feedback-actions">
+                <button id="detail-feedback-cancel" type="button" class="cancel-btn">Cancel</button>
+                <button id="detail-feedback-save" type="button">Save</button>
+              </div>
+            </div>
+            <div id="detail-feedback-list" class="detail-feedback-list"></div>
+          </section>
+        </section>
+      </article>
+    </dialog>
+
+    <dialog id="image-picker-dialog" class="image-picker-dialog">
+      <form id="image-picker-form" method="dialog" class="image-picker-form">
+        <h2>Choose Main Image</h2>
+        <div id="image-picker-grid" class="image-picker-grid"></div>
+        <label>
+          Add image URL
+          <div class="image-picker-add-row">
+            <input id="image-picker-url" type="url" placeholder="https://..." autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="url" data-lpignore="true" data-1p-ignore="true" />
+            <button id="image-picker-add-btn" type="button">Add</button>
+          </div>
+        </label>
+        <menu>
+          <button id="image-picker-close-btn" type="submit" class="cancel-btn">Done</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="feedback-dialog" class="feedback-dialog">
+      <form id="feedback-form" method="dialog" class="feedback-form">
+        <h2>Add Feedback</h2>
+        <label>
+          Feedback (max 200 characters)
+          <input id="feedback-input" type="text" maxlength="200" placeholder="Type feedback..." autocomplete="new-password" autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="text" data-lpignore="true" data-1p-ignore="true" />
+        </label>
+        <section>
+          <h3>Choose up to 3 emojis</h3>
+          <div id="feedback-emoji-grid" class="feedback-emoji-grid"></div>
+        </section>
+        <menu>
+          <button id="feedback-cancel-btn" type="button" class="cancel-btn">Cancel</button>
+          <button id="feedback-save-btn" type="submit">Save</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="category-add-dialog" class="new-board-dialog">
+      <form id="category-add-form" method="dialog" class="new-board-form">
+        <h2>New Category</h2>
+        <label>
+          New Category Name
+          <input id="category-add-name" type="text" maxlength="60" placeholder="e.g. Color, Size, Shape" autocomplete="new-password" autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="text" data-lpignore="true" data-1p-ignore="true" required />
+        </label>
+        <menu>
+          <button id="category-add-cancel-btn" type="button" class="cancel-btn">Cancel</button>
+          <button id="category-add-save-btn" type="submit">Add</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="category-delete-dialog" class="new-board-dialog">
+      <form id="category-delete-form" method="dialog" class="new-board-form">
+        <h2>Delete Category</h2>
+        <p id="category-delete-message">Are you sure you want to delete this category? These items will be unavailable after you delete them.</p>
+        <menu>
+          <button id="category-delete-no-btn" type="button" class="cancel-btn">No</button>
+          <button id="category-delete-yes-btn" type="submit">Yes</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="board-delete-dialog" class="new-board-dialog">
+      <form id="board-delete-form" method="dialog" class="new-board-form">
+        <h2>Delete Board</h2>
+        <p id="board-delete-message">Are you sure you want to delete this board?</p>
+        <menu>
+          <button id="board-delete-no-btn" type="button" class="cancel-btn">No</button>
+          <button id="board-delete-yes-btn" type="submit">Yes</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="error-dialog" class="error-dialog">
+      <form id="error-dialog-form" method="dialog" class="error-dialog-form">
+        <button id="error-dialog-close-btn" type="button" class="error-dialog-close-btn" aria-label="Close error dialog">×</button>
+        <h2 id="error-dialog-title">Notice</h2>
+        <p id="error-dialog-message" class="error-dialog-message"></p>
+        <menu class="error-dialog-actions">
+          <button id="error-dialog-ok-btn" type="button">OK</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="auth-dialog" class="auth-dialog">
+      <article class="auth-dialog-shell" aria-label="Sign in or create account">
+        <button id="auth-dialog-close-btn" type="button" class="auth-dialog-close-btn" aria-label="Close sign in dialog">×</button>
+        <h2 class="auth-dialog-title">Sign In or Create Account</h2>
+        <p id="auth-dialog-message" class="auth-dialog-message hidden" aria-live="polite"></p>
+
+        <section id="beta-auth-panel" class="beta-auth-panel" aria-label="Sign in or create account">
+          <div class="beta-auth-toggle" role="tablist" aria-label="Account actions">
+            <button id="beta-tab-sign-in" class="beta-auth-tab active" type="button" role="tab" aria-selected="true">Sign In</button>
+            <button id="beta-tab-sign-up" class="beta-auth-tab" type="button" role="tab" aria-selected="false">Create Account</button>
+          </div>
+          <form id="beta-auth-form" class="beta-auth-form" autocomplete="off">
+            <label class="beta-auth-field">
+              Email
+              <input id="beta-auth-email" type="email" maxlength="320" inputmode="email" autocomplete="email" required />
+            </label>
+            <label class="beta-auth-field">
+              Password
+              <input id="beta-auth-password" type="password" minlength="8" maxlength="256" autocomplete="current-password" required />
+            </label>
+            <button id="beta-auth-submit" class="beta-enter-btn beta-auth-submit" type="submit">Continue</button>
+          </form>
+        </section>
+
+        <p id="beta-auth-status" class="beta-gate-status auth-dialog-status hidden" aria-live="polite"></p>
+      </article>
+    </dialog>
+
+    <div id="hover-preview" class="hover-preview hidden" aria-hidden="true">
+      <button id="hover-preview-prev" type="button" class="hover-preview-nav" aria-label="Previous image">‹</button>
+      <div class="hover-preview-center">
+        <div class="hover-preview-image-wrap">
+          <img id="hover-preview-image" class="hover-preview-image" alt="Item preview" />
+          <div class="hover-preview-actions">
+            <button id="hover-preview-delete" type="button" class="hover-preview-delete" aria-label="Delete image">🗑</button>
+            <button id="hover-preview-star" type="button" class="hover-preview-star" aria-label="Set as cover image">☆</button>
+          </div>
+        </div>
+        <div class="hover-preview-thumbs-row">
+          <div id="hover-preview-thumbs" class="hover-preview-thumbs"></div>
+          <button id="hover-preview-add-btn" type="button" class="hover-preview-thumb hover-preview-thumb-add" aria-label="Add image">+</button>
+        </div>
+      </div>
+      <button id="hover-preview-next" type="button" class="hover-preview-nav" aria-label="Next image">›</button>
+    </div>
+
+    <dialog id="hover-add-dialog" class="new-board-dialog">
+      <form id="hover-add-form" method="dialog" class="new-board-form">
+        <button id="hover-add-close-btn" type="button" class="hover-add-close-btn" aria-label="Close add image dialog">×</button>
+        <h2>Add Image</h2>
+        <label>
+          Image URL
+          <input id="hover-add-url" type="url" placeholder="Paste image URL..." autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="url" data-lpignore="true" data-1p-ignore="true" />
+        </label>
+        <div id="hover-add-drop-zone" class="hover-add-drop-zone" role="button" tabindex="0" aria-label="Drop an image here or click to upload">
+          <p>Drag and drop an image here</p>
+          <p class="hover-add-drop-zone-hint">or click to upload from your computer</p>
+        </div>
+        <menu>
+          <button id="hover-add-upload-btn" type="button" class="cancel-btn">Upload</button>
+          <button id="hover-add-url-btn" type="submit">Add URL</button>
+        </menu>
+        <input id="hover-add-upload-input" type="file" accept="image/*" class="hidden" />
+      </form>
+    </dialog>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
