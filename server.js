@@ -8,9 +8,37 @@ import { DatabaseSync } from 'node:sqlite';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+function loadDotEnvFile(envPath) {
+  if (!fsSync.existsSync(envPath)) return;
+  const raw = fsSync.readFileSync(envPath, 'utf8');
+  const lines = raw.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIndex = trimmed.indexOf('=');
+    if (eqIndex <= 0) continue;
+    const key = trimmed.slice(0, eqIndex).trim();
+    const value = trimmed.slice(eqIndex + 1).trim();
+    if (!(key in process.env)) {
+      process.env[key] = value;
+    }
+  }
+}
+
+loadDotEnvFile(path.join(__dirname, '.env'));
 const publicDir = path.join(__dirname, 'public');
 const migrationsDir = path.join(__dirname, 'migrations');
-const dataDir = path.join(__dirname, 'data');
+const renderPersistentDataDir = '/var/data';
+const runningOnRender = Boolean(
+  process.env.RENDER
+  || process.env.RENDER_SERVICE_ID
+  || process.env.RENDER_EXTERNAL_URL
+);
+const defaultDataDir = runningOnRender && fsSync.existsSync(renderPersistentDataDir)
+  ? path.join(renderPersistentDataDir, 'shopboard')
+  : path.join(__dirname, 'data');
+const dataDir = process.env.DATA_DIR ? String(process.env.DATA_DIR).trim() : defaultDataDir;
 const dbPath = process.env.DATA_DB_PATH || path.join(dataDir, 'shopping-tool.sqlite');
 const appDataPath = process.env.APP_DATA_PATH || path.join(dataDir, 'app-data.json');
 const PORT = process.env.PORT || 3000;
@@ -39,25 +67,6 @@ const DEFAULT_CATEGORIES = [
   { slug: 'feedback', label: 'Feedback', type: 'text' }
 ];
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
-
-function loadDotEnvFile(envPath) {
-  if (!fsSync.existsSync(envPath)) return;
-  const raw = fsSync.readFileSync(envPath, 'utf8');
-  const lines = raw.split(/\r?\n/);
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eqIndex = trimmed.indexOf('=');
-    if (eqIndex <= 0) continue;
-    const key = trimmed.slice(0, eqIndex).trim();
-    const value = trimmed.slice(eqIndex + 1).trim();
-    if (!(key in process.env)) {
-      process.env[key] = value;
-    }
-  }
-}
-
-loadDotEnvFile(path.join(__dirname, '.env'));
 const ZYTE_API_KEY = process.env.ZYTE_API_KEY?.trim();
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim();
 const OPENAI_ITEM_NAME_MODEL = process.env.OPENAI_ITEM_NAME_MODEL?.trim() || 'gpt-4.1-mini';
@@ -72,6 +81,29 @@ const SUPABASE_AUTH_ENABLED = AUTH_PROVIDER === 'supabase' && Boolean(SUPABASE_U
 
 if (AUTH_PROVIDER === 'supabase' && !SUPABASE_AUTH_ENABLED) {
   console.warn('AUTH_PROVIDER is set to "supabase" but SUPABASE_URL or SUPABASE_ANON_KEY is missing. Falling back to local auth.');
+}
+
+function maskEmail(email) {
+  const normalized = String(email || '').trim().toLowerCase();
+  const atIndex = normalized.indexOf('@');
+  if (atIndex <= 0) return normalized ? '***' : '';
+  const local = normalized.slice(0, atIndex);
+  const domain = normalized.slice(atIndex + 1);
+  const head = local.slice(0, 2);
+  return `${head || '*'}***@${domain || '***'}`;
+}
+
+function authLog(level, event, details = {}) {
+  const payload = {
+    event,
+    provider: isSupabaseAuthEnabled() ? 'supabase' : 'local',
+    ...details
+  };
+  if (level === 'warn') {
+    console.warn('[auth]', payload);
+    return;
+  }
+  console.log('[auth]', payload);
 }
 
 const MIME_TYPES = {
@@ -1696,6 +1728,90 @@ function provisionDemoBoardForUser(db, userId, options = {}) {
   }
 }
 
+async function ensureOwnerMasterBoardAttached(db, userId) {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) {
+    return { attached: false, reason: 'invalid-user' };
+  }
+  const ownerEmail = normalizeEmailAddress(DEMO_TEMPLATE_OWNER_EMAIL);
+  if (!ownerEmail) {
+    return { attached: false, reason: 'owner-not-configured' };
+  }
+  const user = readPublicUserById(db, normalizedUserId);
+  if (!user) {
+    return { attached: false, reason: 'user-not-found' };
+  }
+  if (normalizeEmailAddress(user.email) !== ownerEmail) {
+    return { attached: false, reason: 'not-owner' };
+  }
+
+  const ownerBoardName = normalizeDemoBoardName(DEMO_TEMPLATE_OWNER_BOARD_NAME, 'Home Reno');
+  const existingSnapshot = readUserSnapshot(db, normalizedUserId);
+  if (findBoardIdByName(existingSnapshot, ownerBoardName)) {
+    return { attached: false, reason: 'owner-board-exists' };
+  }
+
+  let cloned = null;
+  try {
+    const sharedSnapshot = await readAppDataSnapshot();
+    const sourceBoardId = findBoardIdByName(sharedSnapshot, ownerBoardName);
+    const sourceBoard = sourceBoardId ? findBoardInSnapshot(sharedSnapshot, sourceBoardId) : null;
+    if (sourceBoard) {
+      const sourceFieldCategories = normalizeTemplateFieldCategories([], sourceBoard);
+      const sourceCustomValues = collectCustomValuesFromBoardSnapshot(sourceBoard, sourceFieldCategories);
+      cloned = cloneBoardFromTemplateRecord({
+        title: ownerBoardName,
+        board_json: JSON.stringify(cloneJson(sourceBoard, sourceBoard)),
+        field_categories_json: JSON.stringify(sourceFieldCategories),
+        item_custom_values_json: JSON.stringify(sourceCustomValues)
+      }, {
+        boardName: ownerBoardName
+      });
+    }
+  } catch (error) {
+    console.warn('Could not inspect anonymous snapshot for owner board attach:', error);
+  }
+
+  if (!cloned) {
+    const ownerTemplateSlug = normalizeTemplateSlug(DEMO_TEMPLATE_OWNER_TEMPLATE_SLUG, DEFAULT_DEMO_TEMPLATE_SLUG);
+    const ownerTemplate = readBoardTemplateBySlug(db, ownerTemplateSlug, { activeOnly: true })
+      || readBoardTemplateBySlug(db, ownerTemplateSlug, { activeOnly: false })
+      || resolveProvisioningTemplate(db, ownerTemplateSlug)
+      || resolveProvisioningTemplate(db, '');
+    if (!ownerTemplate) {
+      return { attached: false, reason: 'no-owner-source-board' };
+    }
+    cloned = cloneBoardFromTemplateRecord(ownerTemplate, {
+      boardName: ownerBoardName
+    });
+  }
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const latestSnapshot = readUserSnapshot(db, normalizedUserId);
+    if (findBoardIdByName(latestSnapshot, ownerBoardName)) {
+      db.exec('COMMIT');
+      return { attached: false, reason: 'owner-board-exists' };
+    }
+    const nextSnapshot = {
+      boards: [cloned.board, ...(Array.isArray(latestSnapshot.boards) ? latestSnapshot.boards : [])]
+    };
+    writeUserSnapshot(db, normalizedUserId, nextSnapshot);
+    const insertedCategories = replaceBoardFieldCategories(db, cloned.board.id, cloned.fieldCategories);
+    replaceBoardCustomValues(db, cloned.board.id, cloned.customValues, insertedCategories);
+    markUserDemoBoardSeeded(db, normalizedUserId);
+    db.exec('COMMIT');
+    return {
+      attached: true,
+      reason: 'owner-board-attached',
+      boardId: cloned.board.id
+    };
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
 function lookupAuthContext(db, req) {
   const cookies = parseCookieHeader(req.headers.cookie || '');
   const token = String(cookies[AUTH_COOKIE_NAME] || '').trim();
@@ -1746,8 +1862,17 @@ function lookupAuthContext(db, req) {
 
 async function createAccount(db, payload = {}) {
   if (isSupabaseAuthEnabled()) {
-    const identity = await signUpWithSupabase(payload);
-    return ensureLocalUserForSupabaseIdentity(db, identity);
+    try {
+      const identity = await signUpWithSupabase(payload);
+      return ensureLocalUserForSupabaseIdentity(db, identity);
+    } catch (error) {
+      authLog('warn', 'sign_up_failed', {
+        email: maskEmail(payload?.email),
+        status: Number(error?.status || 500),
+        reason: error instanceof Error ? error.message : 'unknown-error'
+      });
+      throw error;
+    }
   }
 
   const email = normalizeEmailAddress(payload.email);
@@ -1768,8 +1893,17 @@ async function createAccount(db, payload = {}) {
     `).run(id, email, passwordHash, displayName);
   } catch (error) {
     if (String(error?.message || '').includes('users.email')) {
+      authLog('warn', 'sign_up_failed_duplicate_email', {
+        email: maskEmail(email),
+        status: 409
+      });
       throw new DataError('An account with that email already exists.', 409);
     }
+    authLog('warn', 'sign_up_failed', {
+      email: maskEmail(email),
+      status: Number(error?.status || 500),
+      reason: error instanceof Error ? error.message : 'unknown-error'
+    });
     throw error;
   }
   return readPublicUserById(db, id);
@@ -1777,8 +1911,17 @@ async function createAccount(db, payload = {}) {
 
 async function authenticateAccount(db, payload = {}) {
   if (isSupabaseAuthEnabled()) {
-    const identity = await signInWithSupabase(payload);
-    return ensureLocalUserForSupabaseIdentity(db, identity);
+    try {
+      const identity = await signInWithSupabase(payload);
+      return ensureLocalUserForSupabaseIdentity(db, identity);
+    } catch (error) {
+      authLog('warn', 'sign_in_failed', {
+        email: maskEmail(payload?.email),
+        status: Number(error?.status || 500),
+        reason: error instanceof Error ? error.message : 'unknown-error'
+      });
+      throw error;
+    }
   }
 
   const email = normalizeEmailAddress(payload.email);
@@ -1792,6 +1935,11 @@ async function authenticateAccount(db, payload = {}) {
     WHERE email = ?
   `).get(email);
   if (!row || !verifyPassword(password, row.password_hash)) {
+    authLog('warn', 'sign_in_failed_invalid_credentials', {
+      email: maskEmail(email),
+      status: 401,
+      accountFound: Boolean(row)
+    });
     throw new DataError('Invalid email or password.', 401);
   }
   return rowToPublicUser(row);
@@ -4687,6 +4835,7 @@ export function createServer({ databasePath = dbPath } = {}) {
       if (pathname === '/api/auth/session' && method === 'GET') {
         const authContext = lookupAuthContext(db, req);
         if (!authContext.authenticated && authContext.sessionToken) {
+          authLog('warn', 'session_cookie_rejected', { status: 401 });
           appendSetCookieHeader(res, createClearSessionCookie(req));
         }
         respondJson(res, 200, {
@@ -4705,9 +4854,25 @@ export function createServer({ databasePath = dbPath } = {}) {
         } catch (error) {
           console.warn('Could not auto-provision demo board after sign-up:', error);
         }
+        try {
+          const ownerAttachResult = await ensureOwnerMasterBoardAttached(db, createdUser.id);
+          if (ownerAttachResult.attached) {
+            authLog('info', 'owner_board_attached_after_sign_up', {
+              userId: createdUser.id,
+              boardId: ownerAttachResult.boardId || ''
+            });
+          }
+        } catch (error) {
+          console.warn('Could not auto-attach owner master board after sign-up:', error);
+        }
         const user = readPublicUserById(db, createdUser.id) || createdUser;
         const session = createSessionForUser(db, user.id);
         appendSetCookieHeader(res, createSessionCookie(session.token, req));
+        authLog('info', 'sign_up_succeeded', {
+          email: maskEmail(user?.email),
+          userId: user?.id || '',
+          status: 201
+        });
         respondJson(res, 201, {
           authenticated: true,
           user,
@@ -4724,9 +4889,25 @@ export function createServer({ databasePath = dbPath } = {}) {
         } catch (error) {
           console.warn('Could not auto-provision demo board after sign-in:', error);
         }
+        try {
+          const ownerAttachResult = await ensureOwnerMasterBoardAttached(db, authenticatedUser.id);
+          if (ownerAttachResult.attached) {
+            authLog('info', 'owner_board_attached_after_sign_in', {
+              userId: authenticatedUser.id,
+              boardId: ownerAttachResult.boardId || ''
+            });
+          }
+        } catch (error) {
+          console.warn('Could not auto-attach owner master board after sign-in:', error);
+        }
         const user = readPublicUserById(db, authenticatedUser.id) || authenticatedUser;
         const session = createSessionForUser(db, user.id);
         appendSetCookieHeader(res, createSessionCookie(session.token, req));
+        authLog('info', 'sign_in_succeeded', {
+          email: maskEmail(user?.email),
+          userId: user?.id || '',
+          status: 200
+        });
         respondJson(res, 200, {
           authenticated: true,
           user,
@@ -4738,6 +4919,7 @@ export function createServer({ databasePath = dbPath } = {}) {
       if (pathname === '/api/auth/sign-out' && method === 'POST') {
         clearSessionFromRequest(db, req);
         appendSetCookieHeader(res, createClearSessionCookie(req));
+        authLog('info', 'sign_out_succeeded', { status: 200 });
         respondJson(res, 200, { ok: true, betaWelcomeGateEnabled: BETA_WELCOME_GATE_ENABLED });
         return;
       }
@@ -4855,6 +5037,17 @@ export function createServer({ databasePath = dbPath } = {}) {
               provisionDemoBoardForUser(db, authContext.user.id);
             } catch (error) {
               console.warn('Could not auto-provision demo board during /api/data load:', error);
+            }
+            try {
+              const ownerAttachResult = await ensureOwnerMasterBoardAttached(db, authContext.user.id);
+              if (ownerAttachResult.attached) {
+                authLog('info', 'owner_board_attached_during_data_load', {
+                  userId: authContext.user.id,
+                  boardId: ownerAttachResult.boardId || ''
+                });
+              }
+            } catch (error) {
+              console.warn('Could not auto-attach owner master board during /api/data load:', error);
             }
             respondJson(res, 200, readUserSnapshot(db, authContext.user.id));
             return;
@@ -4995,6 +5188,19 @@ export function createServer({ databasePath = dbPath } = {}) {
 
 export function startServer({ port = PORT, databasePath = dbPath } = {}) {
   const { server, db } = createServer({ databasePath });
+  const resolvedDatabasePath = path.resolve(databasePath);
+  const usesRenderPersistentDisk = resolvedDatabasePath.startsWith(`${renderPersistentDataDir}${path.sep}`) || resolvedDatabasePath === renderPersistentDataDir;
+  const authProviderLabel = isSupabaseAuthEnabled() ? 'supabase' : 'local';
+  console.log('[startup]', {
+    authProvider: authProviderLabel,
+    databasePath: resolvedDatabasePath,
+    appDataPath: path.resolve(appDataPath),
+    runningOnRender,
+    usesRenderPersistentDisk
+  });
+  if (runningOnRender && !usesRenderPersistentDisk && !process.env.DATA_DB_PATH) {
+    console.warn('[startup] Render detected without DATA_DB_PATH and database is not under /var/data. Local DB may reset on redeploy/restart.');
+  }
   return new Promise((resolve) => {
     server.listen(port, () => {
       const address = server.address();
