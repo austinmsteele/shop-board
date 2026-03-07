@@ -4017,6 +4017,10 @@ function commitNewBoardDialog() {
       items: [],
       fieldCategories: createDefaultFieldCategories(categoryId)
     });
+    if (parent?.id) {
+      expandedCategoryIds.add(parent.id);
+      lastExpandedCategoryId = parent.id;
+    }
   }
   pendingCategoryParentId = null;
   saveData();
