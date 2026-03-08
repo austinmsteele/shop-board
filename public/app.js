@@ -2,6 +2,7 @@ const DATA_KEY = 'shopping-organizer-data-v1';
 const LEGACY_ITEMS_KEY = 'shopping-organizer-items';
 const VIEW_STORAGE_KEY = 'shopping-organizer-view';
 const DATA_BACKUP_KEY = 'shopping-organizer-data-v1-backup';
+const DATA_OWNER_KEY = 'shopping-organizer-data-owner-v1';
 const BETA_WELCOME_FALLBACK_KEY = 'shopboard-beta-welcome-ack-v1';
 const BETA_AUTH_MODE_SIGN_IN = 'sign-in';
 const BETA_AUTH_MODE_SIGN_UP = 'sign-up';
@@ -149,6 +150,18 @@ const FAVORITE_RANK_OPTIONS = [
   { rank: 'silver', emoji: '🥈', label: 'Silver favorite' },
   { rank: 'bronze', emoji: '🥉', label: 'Bronze favorite' }
 ];
+const MULTI_BRAND_NAME_SELLER_KEYS = new Set([
+  'wayfair',
+  'allmodern',
+  'jossandmain',
+  'birchlane',
+  'perigold',
+  'homedepot',
+  'lowes',
+  'target',
+  'walmart',
+  'amazon'
+]);
 const DEFAULT_DATA_CATEGORIES = [
   { slug: 'image', label: 'Image', type: 'text', isDefault: true, isDeletable: false, defaultIndex: 0 },
   { slug: 'item_name', label: 'Item Name', type: 'text', isDefault: true, isDeletable: false, defaultIndex: 1 },
@@ -234,6 +247,23 @@ let redoHistory = [];
 let lastSavedSnapshot = serializeDataSnapshot(data);
 let pendingServerSnapshot = '';
 let serverSnapshotPersistInFlight = false;
+const categoryPreviewHover = document.createElement('div');
+categoryPreviewHover.className = 'category-preview-hover hidden';
+categoryPreviewHover.setAttribute('aria-hidden', 'true');
+const categoryPreviewHoverImage = document.createElement('img');
+categoryPreviewHoverImage.className = 'category-preview-hover-image';
+categoryPreviewHoverImage.alt = 'Category item preview';
+const categoryPreviewHoverMeta = document.createElement('div');
+categoryPreviewHoverMeta.className = 'category-preview-hover-meta';
+const categoryPreviewHoverSeller = document.createElement('p');
+categoryPreviewHoverSeller.className = 'category-preview-hover-seller';
+const categoryPreviewHoverPrice = document.createElement('p');
+categoryPreviewHoverPrice.className = 'category-preview-hover-price';
+categoryPreviewHoverMeta.appendChild(categoryPreviewHoverSeller);
+categoryPreviewHoverMeta.appendChild(categoryPreviewHoverPrice);
+categoryPreviewHover.appendChild(categoryPreviewHoverImage);
+categoryPreviewHover.appendChild(categoryPreviewHoverMeta);
+let categoryPreviewHoverAnchor = null;
 
 function isPromptInputTarget(target) {
   if (target instanceof HTMLTextAreaElement) return true;
@@ -319,7 +349,10 @@ document.addEventListener('focusin', (event) => {
   suppressNativeInputSuggestions(target);
 });
 
-if (document.body) document.body.appendChild(rankMenu);
+if (document.body) {
+  document.body.appendChild(rankMenu);
+  document.body.appendChild(categoryPreviewHover);
+}
 
 document.addEventListener('click', () => {
   if (activeCategoryMenu) {
@@ -512,7 +545,7 @@ async function runExtractionJob(job, signal) {
   const payload = await response.json();
   if (!response.ok) {
     const errorText = String(payload.error || '');
-    if (shouldFallbackToBasicItem(errorText)) {
+    if (shouldFallbackToBasicItem(errorText, job.url)) {
       const fallbackItem = buildFallbackItem(job.url);
       const target = getTargetCollectionForAdd(board, fallbackItem, job.url, job.categoryValue);
       target.collection.unshift(fallbackItem);
@@ -533,15 +566,21 @@ async function runExtractionJob(job, signal) {
   const preferredImage = String(payload.image || normalizedImages[0] || '').trim();
   const pinnedImages = pinPrimaryImage([preferredImage, ...normalizedImages], preferredImage || normalizedImages[0] || '');
   const overview = buildOverviewModel(payload, 500);
+  const seller = String(payload.seller || '').trim();
+  const brand = String(payload.brand || '').trim();
+  const normalizedName = normalizeItemName(payload.name || 'Untitled item', payload.url || job.url, {
+    brand,
+    seller
+  });
 
   const item = {
     id: crypto.randomUUID(),
     url: payload.url || job.url,
-    brand: payload.brand || inferBrandFromDescription(payload.name || ''),
-    name: normalizeItemName(payload.name || 'Untitled item', payload.url || job.url),
+    brand: brand || inferBrandFromDescription(normalizedName),
+    name: normalizedName,
     image: pinnedImages[0] || '',
     images: pinnedImages,
-    seller: payload.seller || '',
+    seller,
     price: formatPrice(payload.price || ''),
     highlights: (() => {
       const h = normalizeHighlights(payload.highlights || []);
@@ -1324,6 +1363,24 @@ document.addEventListener('mousedown', (event) => {
   hideHoverPreview();
 });
 
+document.addEventListener('scroll', () => {
+  if (categoryPreviewHover.classList.contains('hidden')) return;
+  if (!categoryPreviewHoverAnchor) {
+    hideCategoryPreviewHover();
+    return;
+  }
+  positionCategoryPreviewHover(categoryPreviewHoverAnchor);
+}, true);
+
+window.addEventListener('resize', () => {
+  if (categoryPreviewHover.classList.contains('hidden')) return;
+  if (!categoryPreviewHoverAnchor) {
+    hideCategoryPreviewHover();
+    return;
+  }
+  positionCategoryPreviewHover(categoryPreviewHoverAnchor);
+});
+
 document.addEventListener('mousedown', (event) => {
   if (rankMenu.classList.contains('hidden')) return;
   const target = event.target;
@@ -1400,9 +1457,10 @@ editForm.addEventListener('submit', (event) => {
 
   const brand = editBrand.value.trim();
   const description = editDescription.value.trim() || 'Untitled item';
+  const seller = editSeller.value.trim() || item.seller || 'Unknown';
   item.brand = brand;
-  item.name = normalizeItemName(description, item.url || '');
-  item.seller = editSeller.value.trim() || item.seller || 'Unknown';
+  item.name = normalizeItemName(description, item.url || '', { brand, seller });
+  item.seller = seller;
   item.price = formatPrice(editPrice.value);
   item.image = editImage.value.trim();
   item.images = pinPrimaryImage([item.image, ...(item.images || [])], item.image);
@@ -1878,6 +1936,32 @@ function mergeLocalAndServerBoards(localBoards = [], serverBoards = []) {
   return merged;
 }
 
+function getLocalSnapshotOwnerKey() {
+  try {
+    return String(localStorage.getItem(DATA_OWNER_KEY) || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+function setLocalSnapshotOwnerKey(ownerKey) {
+  try {
+    const normalized = String(ownerKey || '').trim();
+    if (!normalized) {
+      localStorage.removeItem(DATA_OWNER_KEY);
+      return;
+    }
+    localStorage.setItem(DATA_OWNER_KEY, normalized);
+  } catch {
+    // ignore storage write failures
+  }
+}
+
+function getCurrentSessionOwnerKey() {
+  const userId = String(activeSessionUser?.id || '').trim();
+  return userId ? `user:${userId}` : '';
+}
+
 async function hydrateDataFromServer() {
   try {
     const payload = await apiRequest('/api/data');
@@ -1885,12 +1969,21 @@ async function hydrateDataFromServer() {
     const normalizedServerData = { boards: serverBoards.map(normalizeBoard) };
     const hasServerData = normalizedServerData.boards.length > 0;
     const hasLocalData = Array.isArray(data?.boards) && data.boards.length > 0;
+    const localOwnerKey = getLocalSnapshotOwnerKey();
+    const sessionOwnerKey = getCurrentSessionOwnerKey();
+    const canMergeLocalIntoSession = Boolean(
+      activeSessionUser
+      && hasLocalData
+      && localOwnerKey
+      && sessionOwnerKey
+      && localOwnerKey === sessionOwnerKey
+    );
 
     if (hasServerData) {
       let nextData = normalizedServerData;
       let shouldClearLocalSnapshot = true;
 
-      if (activeSessionUser && hasLocalData) {
+      if (canMergeLocalIntoSession) {
         const mergedData = {
           boards: mergeLocalAndServerBoards(data.boards || [], normalizedServerData.boards || [])
         };
@@ -1918,6 +2011,10 @@ async function hydrateDataFromServer() {
 
     if (hasLocalData) {
       if (!activeSessionUser) return;
+      if (!canMergeLocalIntoSession) {
+        clearLegacyLocalDataKeys();
+        return;
+      }
       const migrated = await persistSnapshotToServer(lastSavedSnapshot || serializeDataSnapshot(data));
       if (migrated) clearLegacyLocalDataKeys();
       return;
@@ -1936,6 +2033,7 @@ function clearLegacyLocalDataKeys() {
     localStorage.removeItem(DATA_KEY);
     localStorage.removeItem(DATA_BACKUP_KEY);
     localStorage.removeItem(LEGACY_ITEMS_KEY);
+    localStorage.removeItem(DATA_OWNER_KEY);
   } catch {
     // ignore local storage cleanup failures
   }
@@ -2108,8 +2206,10 @@ function normalizeItems(items) {
   return list.map((item) => ({
     ...(() => {
       const url = String(item?.url || '');
+      const seller = String(item?.seller || '');
+      const brand = String(item?.brand || '');
       const rawName = String(item?.name || 'Untitled item');
-      const name = normalizeItemName(rawName, url);
+      const name = normalizeItemName(rawName, url, { brand, seller });
       const highlights = normalizeHighlights(item?.highlights || item?.notes || []);
       const normalizedImages = normalizeImages(item?.images || item?.image || '');
       const featuredImage = String(item?.image || normalizedImages[0] || '').trim();
@@ -2118,11 +2218,11 @@ function normalizeItems(items) {
       return {
         id: item?.id || crypto.randomUUID(),
         url,
-        brand: String(item?.brand || inferBrandFromDescription(name)),
+        brand: brand || inferBrandFromDescription(name),
         name,
         image: pinnedImages[0] || '',
         images: pinnedImages,
-        seller: String(item?.seller || ''),
+        seller,
         price: formatPrice(item?.price || ''),
         favoriteRank: normalizeFavoriteRank(
           item?.favoriteRank ||
@@ -2399,6 +2499,7 @@ function persistSnapshotToLocal(serialized) {
   try {
     localStorage.setItem(DATA_KEY, payload);
     localStorage.setItem(DATA_BACKUP_KEY, payload);
+    setLocalSnapshotOwnerKey('guest');
   } catch {
     // ignore storage write failures for guest-mode persistence
   }
@@ -3181,21 +3282,27 @@ function openCategoryFromGallery(categoryId) {
   const selected = rootCategories.find((entry) => entry?.id === categoryId);
   if (!selected) return;
 
-  activeCategoryPath = [];
-  activeImageRootCategoryId = selected.id;
-  expandedCategoryIds.clear();
-  expandedCategoryIds.add(selected.id);
-  const firstSubcategory = getVisibleSubcategories(selected)[0];
-  if (firstSubcategory?.id) {
-    expandedCategoryIds.add(firstSubcategory.id);
-    lastExpandedCategoryId = firstSubcategory.id;
-  } else {
-    lastExpandedCategoryId = selected.id;
-  }
+  focusImageViewOnRootCategory(selected);
 
   activeView = 'image';
   saveView();
   renderBoardDetail();
+}
+
+function focusImageViewOnRootCategory(rootCategoryNode) {
+  if (!rootCategoryNode?.id) return false;
+  activeCategoryPath = [];
+  activeImageRootCategoryId = rootCategoryNode.id;
+  expandedCategoryIds.clear();
+  expandedCategoryIds.add(rootCategoryNode.id);
+  const firstSubcategory = getFirstRealChildNode(rootCategoryNode);
+  if (firstSubcategory?.id) {
+    expandedCategoryIds.add(firstSubcategory.id);
+    lastExpandedCategoryId = firstSubcategory.id;
+  } else {
+    lastExpandedCategoryId = rootCategoryNode.id;
+  }
+  return true;
 }
 
 function renderCategoryGalleryCard(categoryNode) {
@@ -3256,13 +3363,26 @@ function renderCategoryGallery(categories = []) {
 function getCategoryPreviewImages(categoryNode, limit = 5) {
   const children = Array.isArray(categoryNode?.children) ? categoryNode.children : [];
   const picks = [];
+  const seen = new Set();
+  const addPreview = (item) => {
+    if (!item || picks.length >= limit) return;
+    const src = getItemPrimaryImage(item);
+    if (!src) return;
+    const key = canonicalImageKey(src) || src;
+    if (seen.has(key)) return;
+    seen.add(key);
+    picks.push({
+      src,
+      seller: String(item?.seller || '').trim(),
+      price: String(item?.price || '').trim()
+    });
+  };
+
   for (const child of children) {
     if (picks.length >= limit) break;
     const childItems = collectAllItemsFromCategory(child);
-    const firstImage = childItems
-      .map((item) => getItemPrimaryImage(item))
-      .find(Boolean);
-    if (firstImage) picks.push(firstImage);
+    const firstWithImage = childItems.find((item) => Boolean(getItemPrimaryImage(item)));
+    addPreview(firstWithImage);
   }
 
   // Fallback for categories without children: show a few own-item images.
@@ -3270,12 +3390,44 @@ function getCategoryPreviewImages(categoryNode, limit = 5) {
     const ownItems = Array.isArray(categoryNode?.items) ? categoryNode.items : [];
     for (const item of ownItems) {
       if (picks.length >= limit) break;
-      const src = getItemPrimaryImage(item);
-      if (src) picks.push(src);
+      addPreview(item);
     }
   }
 
   return picks;
+}
+
+function positionCategoryPreviewHover(anchorEl) {
+  if (!anchorEl || categoryPreviewHover.classList.contains('hidden')) return;
+  const anchorRect = anchorEl.getBoundingClientRect();
+  const hoverRect = categoryPreviewHover.getBoundingClientRect();
+  const viewportPadding = 10;
+  let left = anchorRect.right + 10;
+  if (left + hoverRect.width > window.innerWidth - viewportPadding) {
+    left = anchorRect.left - hoverRect.width - 10;
+  }
+  left = Math.max(viewportPadding, Math.min(left, window.innerWidth - hoverRect.width - viewportPadding));
+  let top = anchorRect.top + (anchorRect.height - hoverRect.height) / 2;
+  top = Math.max(viewportPadding, Math.min(top, window.innerHeight - hoverRect.height - viewportPadding));
+  categoryPreviewHover.style.left = `${Math.round(left)}px`;
+  categoryPreviewHover.style.top = `${Math.round(top)}px`;
+}
+
+function showCategoryPreviewHover(anchorEl, preview = {}) {
+  if (!anchorEl || !preview?.src) return;
+  categoryPreviewHoverImage.src = preview.src;
+  categoryPreviewHoverSeller.textContent = `Seller: ${preview.seller || 'Unknown seller'}`;
+  categoryPreviewHoverPrice.textContent = `Price: ${preview.price || 'Price unavailable'}`;
+  categoryPreviewHover.classList.remove('hidden');
+  categoryPreviewHover.setAttribute('aria-hidden', 'false');
+  categoryPreviewHoverAnchor = anchorEl;
+  positionCategoryPreviewHover(anchorEl);
+}
+
+function hideCategoryPreviewHover() {
+  categoryPreviewHover.classList.add('hidden');
+  categoryPreviewHover.setAttribute('aria-hidden', 'true');
+  categoryPreviewHoverAnchor = null;
 }
 
 function findTopItemInCategory(node) {
@@ -3481,6 +3633,7 @@ function applyInitialShareLinkState() {
 function renderApp() {
   closeRankMenu();
   hideHoverPreview();
+  hideCategoryPreviewHover();
   closeEditCategoriesInline();
   const board = getActiveBoard();
   const isBoardMode = Boolean(board);
@@ -4880,12 +5033,21 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
     card.classList.add('has-category-previews');
     const previewStrip = document.createElement('div');
     previewStrip.className = 'category-card-preview-strip';
-    for (const src of previewImages) {
+    for (const preview of previewImages) {
       const img = document.createElement('img');
       img.className = 'category-card-preview-image';
-      img.src = src;
+      img.src = preview.src;
       img.alt = '';
       img.loading = 'lazy';
+      img.addEventListener('mouseenter', () => {
+        showCategoryPreviewHover(img, preview);
+      });
+      img.addEventListener('mousemove', () => {
+        if (categoryPreviewHoverAnchor === img) positionCategoryPreviewHover(img);
+      });
+      img.addEventListener('mouseleave', () => {
+        hideCategoryPreviewHover();
+      });
       previewStrip.appendChild(img);
     }
     titleRow.appendChild(previewStrip);
@@ -5513,7 +5675,10 @@ function buildItemCellForCategory(row, item, category, board) {
         type: 'text',
         placeholder: 'Item name',
         onSave: (next) => {
-          item.name = normalizeItemName(next || 'Untitled item', item.url || '');
+          item.name = normalizeItemName(next || 'Untitled item', item.url || '', {
+            brand: item.brand || '',
+            seller: item.seller || ''
+          });
         }
       });
     });
@@ -6117,7 +6282,10 @@ function buildImageItemCard(item, options = {}) {
         type: 'text',
         placeholder: 'Item name',
         onSave: (next) => {
-          item.name = normalizeItemName(next || 'Untitled item', item.url || '');
+          item.name = normalizeItemName(next || 'Untitled item', item.url || '', {
+            brand: item.brand || '',
+            seller: item.seller || ''
+          });
         }
       });
     });
@@ -6708,7 +6876,10 @@ function renderDetailHeaderFields(item) {
         initialValue: item.name || '',
         placeholder: 'Item name',
         onSave: (next) => {
-          item.name = normalizeItemName(String(next || '').trim() || 'Untitled item', item.url || '');
+          item.name = normalizeItemName(String(next || '').trim() || 'Untitled item', item.url || '', {
+            brand: item.brand || '',
+            seller: item.seller || ''
+          });
           renderDetailHeaderFields(item);
         }
       });
@@ -7246,9 +7417,18 @@ function normalizeProductUrl(raw) {
   }
 }
 
-function shouldFallbackToBasicItem(errorText) {
+function shouldFallbackToBasicItem(errorText, rawUrl = '') {
   const text = String(errorText || '').toLowerCase();
   if (!text) return false;
+  const sellerKey = normalizeSellerKeyForName(rawUrl);
+  if (sellerKey === 'homedepot' || sellerKey === 'lowes') return false;
+  if (
+    text.includes('blocked automated extraction') ||
+    text.includes('source page is blocked by anti-bot protection') ||
+    text.includes('blocked/invalid page content')
+  ) {
+    return false;
+  }
   return (
     /status\s*(403|429|430|451|500|502|503|504)/i.test(text) ||
     text.includes('access denied') ||
@@ -7259,8 +7439,83 @@ function shouldFallbackToBasicItem(errorText) {
   );
 }
 
-function inferBrandFromDescription(description) {
-  const text = String(description || '').trim();
+function normalizeSellerKeyForName(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return '';
+  let host = raw;
+  if (host.includes('.') || /^https?:\/\//i.test(host)) {
+    try {
+      const parsed = new URL(/^https?:\/\//i.test(host) ? host : `https://${host}`);
+      host = parsed.hostname.toLowerCase();
+    } catch {
+      host = raw;
+    }
+  }
+  host = host.replace(/^www\./, '');
+  const key = (host.split('.')[0] || host).replace(/[^a-z0-9]+/g, '');
+  if (key === 'thehomedepot' || key === 'homedepotcom') return 'homedepot';
+  if (key === 'lowe' || key === 'lowescom') return 'lowes';
+  if (key === 'jossmain') return 'jossandmain';
+  return key;
+}
+
+function normalizeBrandLabel(value) {
+  return String(value || '')
+    .replace(/^\s*by\s+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function findNameSpecStartIndex(tokens = []) {
+  const unitWords = new Set(['in', 'inch', 'inches', 'ft', 'cm', 'mm', 'light', 'lights', 'piece', 'pc', 'pack', 'count']);
+  for (let i = 0; i < tokens.length; i += 1) {
+    const current = String(tokens[i] || '').toLowerCase().replace(/[^a-z0-9.]+/g, '');
+    const next = String(tokens[i + 1] || '').toLowerCase().replace(/[^a-z0-9.]+/g, '');
+    if (!current || !/\d/.test(current)) continue;
+    if (unitWords.has(next)) return i;
+    if (/^\d+(?:\.\d+)?(?:in|inch|inches|ft|cm|mm|light|lights|piece|pc|pack|count)$/.test(current)) return i;
+  }
+  return -1;
+}
+
+function maybeFormatNameAsBrandModel(name, sourceUrl = '', options = {}) {
+  const clean = String(name || '').replace(/\s+/g, ' ').trim();
+  if (!clean || /\bby\s+[a-z]/i.test(clean)) return clean;
+  const sellerKey = normalizeSellerKeyForName(options?.seller || sourceUrl);
+  if (!MULTI_BRAND_NAME_SELLER_KEYS.has(sellerKey)) return clean;
+
+  let brand = normalizeBrandLabel(options?.brand || '');
+  let working = clean;
+  const initialTokens = working.split(/\s+/).filter(Boolean);
+  const specStart = findNameSpecStartIndex(initialTokens);
+  if (!brand && specStart >= 3 && /^[A-Z][A-Za-z&'-]{1,}$/.test(initialTokens[0]) && /^[A-Z][A-Za-z&'-]{1,}$/.test(initialTokens[1])) {
+    brand = normalizeBrandLabel(`${initialTokens[0]} ${initialTokens[1]}`);
+    working = initialTokens.slice(2).join(' ').trim();
+  }
+  if (!brand || isRetailerOnlyName(brand)) return clean;
+
+  const escapedBrand = escapeRegExp(brand).replace(/\s+/g, '\\s+');
+  working = working
+    .replace(new RegExp(`^${escapedBrand}(?:\\b|\\s|[-–—|,:])+`, 'i'), '')
+    .replace(/^[|,:;\-–—\s]+|[|,:;\-–—\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const tokens = working.split(/\s+/).filter(Boolean);
+  const cutAt = findNameSpecStartIndex(tokens);
+  const model = cutAt > 0 && cutAt <= 3 ? tokens.slice(0, cutAt).join(' ') : working;
+  const compact = cleanExtractedItemName(model).replace(/^[|,:;\-–—\s]+|[|,:;\-–—\s]+$/g, '').trim();
+  if (!compact || isRetailerOnlyName(compact)) return clean;
+  return `${compact} by ${brand}`;
+}
+
+function inferBrandFromDescription(description, options = {}) {
+  const text = String(description || '').replace(/\s+/g, ' ').trim();
+  const byMatch = text.match(/\bby\s+([a-z0-9&' .()-]+)$/i);
+  if (byMatch?.[1]) return normalizeBrandLabel(byMatch[1]);
+  const inferredName = maybeFormatNameAsBrandModel(text, options?.sourceUrl || '', options);
+  const inferredMatch = inferredName.match(/\bby\s+([a-z0-9&' .()-]+)$/i);
+  if (inferredMatch?.[1]) return normalizeBrandLabel(inferredMatch[1]);
   const commaIndex = text.indexOf(',');
   if (commaIndex <= 0) return '';
   return text.slice(0, commaIndex).trim();
@@ -7276,7 +7531,7 @@ function truncateItemName(text, maxChars = ITEM_NAME_MAX_LENGTH) {
   return `${clipped.trim()}...`;
 }
 
-function normalizeItemName(name, sourceUrl = '') {
+function normalizeItemName(name, sourceUrl = '', options = {}) {
   const value = cleanExtractedItemName(name);
   if (
     !value ||
@@ -7285,7 +7540,8 @@ function normalizeItemName(name, sourceUrl = '') {
   ) {
     return truncateItemName(cleanExtractedItemName(itemNameFromUrl(sourceUrl)) || 'Untitled item');
   }
-  return truncateItemName(value);
+  const formatted = maybeFormatNameAsBrandModel(value, sourceUrl, options);
+  return truncateItemName(formatted || value);
 }
 
 function itemNameFromUrl(rawUrl) {
@@ -7425,6 +7681,7 @@ function cleanExtractedItemName(value) {
     .replace(/^\s*amazon(?:\.com)?\s*:\s*/i, '')
     .replace(/\s*:\s*(?:toys?\s*&\s*games?|home\s*&\s*kitchen|sports?\s*&\s*outdoors?)\s*$/i, '')
     .replace(/^(all\s*modern|allmodern|wayfair|joss\s*&?\s*main|jossandmain|birch\s*lane|birchlane|perigold|amazon(?:\.com)?)\b[\s,:-]*/i, '')
+    .replace(/\b[a-z]{0,3}\d{5,}\b/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -8273,9 +8530,13 @@ function createViewToggleButton(viewValue, label) {
         activeImageRootCategoryId = '';
         expandImageViewTargetCategory(board);
       } else {
-        activeImageRootCategoryId = '';
-        expandedCategoryIds.clear();
-        lastExpandedCategoryId = '';
+        const expandedRootPath = getExpandedRootPath(board);
+        const expandedRoot = expandedRootPath.length ? getCategoryNodeByPath(board, expandedRootPath) : null;
+        if (!focusImageViewOnRootCategory(expandedRoot)) {
+          activeImageRootCategoryId = '';
+          expandedCategoryIds.clear();
+          lastExpandedCategoryId = '';
+        }
       }
     }
     if (board && activeView === 'list' && activeCategoryPath.length === 0) {
@@ -8367,14 +8628,13 @@ function getFirstRealChildNode(node) {
   const children = Array.isArray(node?.children) ? node.children : [];
   const realChildren = children.filter((child) => !/^all items$/i.test(String(child?.name || '').trim()));
   if (!realChildren.length) return null;
-  const withImages = realChildren.find((child) => categoryNodeHasAnyImages(child));
-  return withImages || null;
+  const withItems = realChildren.find((child) => categoryNodeHasAnyItems(child));
+  return withItems || null;
 }
 
-function categoryNodeHasAnyImages(node) {
+function categoryNodeHasAnyItems(node) {
   if (!node) return false;
-  const items = collectAllItemsFromCategory(node);
-  return items.some((item) => normalizeImages(item?.images || item?.image).length > 0);
+  return collectAllItemsFromCategory(node).length > 0;
 }
 
 function findCategoryPathById(board, targetId) {
