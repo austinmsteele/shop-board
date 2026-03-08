@@ -16,18 +16,23 @@
         <p class="beta-wordmark" aria-label="ShopBoard">ShopBoard</p>
         <h1 class="beta-headline">Welcome to ShopBoard</h1>
         <p class="beta-copy">
-          ShopBoard helps you collect options, compare them side-by-side, add feedback, rank and rate items, and make better decisions with friends or family.
+          ShopBoard is designed to make comparing options easier when you're researching or planning a purchase.
         </p>
         <p class="beta-copy">
-          This is an early beta. Some features are still being built and things may occasionally break — your feedback will help shape the product.
+          Paste any product link to automatically collect key details like images, price, seller, item name, then organize, rate, and compare your options side by side.
         </p>
         <p class="beta-copy">
-          By entering, you acknowledge this is a private beta and agree not to copy, reproduce, or distribute the concept or software.
+          This is a private beta. By accessing or using this site, you agree not to copy, reproduce, share, distribute, or use any part of this product, concept, features, or workflow for the purpose of duplicating or competing with it. You also agree not to share access to this beta with others without permission.
         </p>
-        <p class="beta-copy beta-thanks">Thanks for helping test ShopBoard.</p>
+        <p class="beta-copy">
+          By clicking "I Agree" or continuing to use the site, you also agree to our
+          <a href="/terms.html" class="beta-inline-link">Terms</a> and
+          <a href="/terms.html" class="beta-inline-link">Privacy Policy</a>.
+        </p>
+        <p class="beta-copy beta-thanks">Thank you!</p>
 
         <div id="beta-intro-actions" class="beta-intro-actions">
-          <button id="beta-enter-btn" class="beta-enter-btn" type="button">Enter</button>
+          <button id="beta-enter-btn" class="beta-enter-btn" type="button">I Agree</button>
         </div>
 
         <p id="beta-gate-status" class="beta-gate-status hidden" aria-live="polite"></p>
@@ -91,7 +96,7 @@
             <div class="extracting-box">
               <p class="extracting-title">Extracting</p>
               <div class="spinner" aria-hidden="true"></div>
-              <p class="extracting-subtitle">This may take a minute</p>
+              <p class="extracting-subtitle">This may take a minute. You can add another link to the queue.</p>
               <button id="cancel-extract-btn" class="cancel-extract-btn" type="button">Cancel</button>
             </div>
           </section>
@@ -505,6 +510,12 @@
         <input id="hover-add-upload-input" type="file" accept="image/*" class="hidden" />
       </form>
     </dialog>
+
+    <footer class="terms-footer-row">
+      <a href="/terms.html" class="terms-floating-btn" aria-label="View Terms of Use and Privacy Policy">
+        Terms of Use &amp; Privacy Policy
+      </a>
+    </footer>
 
     <script type="module" src="/app.js"></script>
   </body>
