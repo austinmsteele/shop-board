@@ -73,6 +73,33 @@ const OPENAI_ITEM_NAME_MODEL = process.env.OPENAI_ITEM_NAME_MODEL?.trim() || 'gp
 const OPENAI_API_BASE = (process.env.OPENAI_API_BASE || 'https://api.openai.com/v1').replace(/\/+$/, '');
 const OPENAI_ITEM_NAME_TIMEOUT_MS = Math.max(1500, Number(process.env.OPENAI_ITEM_NAME_TIMEOUT_MS || 6000));
 const ITEM_NAME_WORD_LIMIT = 10;
+const BRAND_APPEND_CONFIDENCE_MIN = 0.7;
+const MULTI_BRAND_SELLER_KEYS = new Set([
+  'wayfair',
+  'allmodern',
+  'jossandmain',
+  'birchlane',
+  'perigold',
+  'homedepot',
+  'lowes',
+  'target',
+  'walmart',
+  'amazon',
+  'costco',
+  'overstock'
+]);
+const SINGLE_BRAND_SELLER_KEYS = new Set([
+  'ikea'
+]);
+const BRAND_SOURCE_CONFIDENCE = Object.freeze({
+  json_ld: 0.95,
+  visible_labeled: 0.88,
+  visible_byline: 0.82,
+  breadcrumb: 0.78,
+  metadata: 0.62,
+  inferred: 0.45,
+  unknown: 0.76
+});
 const AUTH_PROVIDER = String(process.env.AUTH_PROVIDER || 'local').trim().toLowerCase();
 const SUPABASE_URL = String(process.env.SUPABASE_URL || '').trim().replace(/\/+$/, '');
 const SUPABASE_ANON_KEY = String(process.env.SUPABASE_ANON_KEY || '').trim();
@@ -1485,6 +1512,8 @@ function isUserTemplateAdmin(user) {
   if (!user) return false;
   const normalizedEmail = normalizeEmailAddress(user.email);
   if (!normalizedEmail) return false;
+  const ownerEmail = normalizeEmailAddress(DEMO_TEMPLATE_OWNER_EMAIL);
+  if (ownerEmail && normalizedEmail === ownerEmail) return true;
   return DEMO_TEMPLATE_ADMIN_EMAILS.has(normalizedEmail);
 }
 
@@ -1505,6 +1534,16 @@ function assertTemplateBoardWriteAccess(db, user, boardId) {
   if (isUserTemplateAdmin(user)) return;
   if (!isProtectedTemplateBoardId(db, boardId)) return;
   throw new DataError('This board is a protected template and cannot be edited.', 403);
+}
+
+function assertTemplateSnapshotWriteAccess(db, user, snapshot) {
+  if (isUserTemplateAdmin(user)) return;
+  const boards = Array.isArray(snapshot?.boards) ? snapshot.boards : [];
+  for (const board of boards) {
+    const boardId = String(board?.id || '').trim();
+    if (!boardId) continue;
+    assertTemplateBoardWriteAccess(db, user, boardId);
+  }
 }
 
 function resolveUserIdByEmail(db, rawEmail) {
@@ -2040,7 +2079,7 @@ function isAmazonUrl(value) {
 function parseMetaTags(html) {
   const meta = {};
   const metaRegex = /<meta\s+[^>]*>/gi;
-  const attrRegex = /(property|name|content)\s*=\s*(["'])(.*?)\2/gi;
+  const attrRegex = /(property|name|itemprop|content)\s*=\s*(["'])(.*?)\2/gi;
 
   const tags = html.match(metaRegex) || [];
 
@@ -2052,7 +2091,7 @@ function parseMetaTags(html) {
     while ((match = attrRegex.exec(tag)) !== null) {
       const attr = match[1].toLowerCase();
       const value = match[3].trim();
-      if ((attr === 'property' || attr === 'name') && !key) key = value.toLowerCase();
+      if ((attr === 'property' || attr === 'name' || attr === 'itemprop') && !key) key = value.toLowerCase();
       if (attr === 'content') content = value;
     }
 
@@ -2099,7 +2138,125 @@ function resolveJsonLdImageCandidate(candidate) {
   return '';
 }
 
-function parseJsonLd(html) {
+function resolveJsonLdOfferNode(node) {
+  if (!node || typeof node !== 'object') return null;
+  const offers = Array.isArray(node.offers) ? node.offers[0] : node.offers;
+  if (!offers || typeof offers !== 'object') return null;
+  return offers;
+}
+
+function parseJsonLdProductNode(node) {
+  if (!node || typeof node !== 'object') return null;
+  const type = String(node['@type'] || '').toLowerCase();
+  if (!type.includes('product')) return null;
+
+  const offers = resolveJsonLdOfferNode(node);
+  const rawBrandNode = node.brand;
+  const rawManufacturerNode = node.manufacturer;
+  const rawBrand = typeof rawBrandNode === 'string'
+    ? rawBrandNode
+    : rawBrandNode?.name || rawBrandNode?.brand || rawBrandNode?.label || '';
+  const rawManufacturer = typeof rawManufacturerNode === 'string'
+    ? rawManufacturerNode
+    : rawManufacturerNode?.name || rawManufacturerNode?.brand || rawManufacturerNode?.label || '';
+  const rawImages = Array.isArray(node.image) ? node.image : node.image ? [node.image] : [];
+  const imageCandidates = rawImages
+    .map((entry) => resolveJsonLdImageCandidate(entry))
+    .filter(Boolean);
+  const offerPrice = offers?.price || offers?.lowPrice || offers?.highPrice || '';
+  const specs = [];
+
+  if (typeof node.weight === 'string') specs.push(`Weight: ${node.weight}`);
+  if (Array.isArray(node.additionalProperty)) {
+    for (const prop of node.additionalProperty) {
+      const key = prop?.name || prop?.propertyID || '';
+      const value = prop?.value || prop?.description || '';
+      if (key && value) specs.push(`${key}: ${value}`);
+    }
+  }
+
+  return {
+    name: String(node.name || '').trim(),
+    brand: String(rawBrand || rawManufacturer || '').trim(),
+    image: imageCandidates[0] || '',
+    images: imageCandidates,
+    seller: String(offers?.seller?.name || '').trim(),
+    price: offerPrice ? `${offers?.priceCurrency ? `${offers.priceCurrency} ` : ''}${offerPrice}`.trim() : '',
+    description: typeof node.description === 'string' ? node.description.trim() : '',
+    dimensions: normalizeDetailList([
+      typeof node.size === 'string' ? node.size : '',
+      typeof node.width === 'string' ? `Width ${node.width}` : '',
+      typeof node.height === 'string' ? `Height ${node.height}` : '',
+      typeof node.depth === 'string' ? `Depth ${node.depth}` : ''
+    ], 8),
+    materials: normalizeDetailList([
+      typeof node.material === 'string' ? node.material : '',
+      ...(Array.isArray(node.material) ? node.material : [])
+    ], 8),
+    specs: normalizeDetailList(specs, 12),
+    productUrl: String(node.url || '').trim(),
+    offerUrl: String(offers?.url || '').trim()
+  };
+}
+
+function urlPathSignature(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || ''));
+    return parsed.pathname.replace(/\/+/g, '/').replace(/\/$/, '').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function scoreJsonLdProductCandidate(candidate, { sourceUrl = '', primaryHeading = '', pageTitle = '' } = {}) {
+  if (!candidate) return Number.NEGATIVE_INFINITY;
+  const name = cleanExtractedItemName(candidate.name || '');
+  let score = 0;
+
+  if (!name) score -= 160;
+  if (isRetailerOnlyName(name)) score -= 120;
+  if (isWeakName(name)) score -= 70;
+
+  const words = name.split(/\s+/).filter(Boolean);
+  if (words.length >= 2 && words.length <= 16) score += 20;
+  if (words.length >= 3 && words.length <= 10) score += 10;
+  if (normalizePrice(candidate.price)) score += 25;
+  if (looksLikeProductImage(candidate.image)) score += 18;
+  if (candidate.description && candidate.description.length >= 30) score += 8;
+
+  const sourcePath = urlPathSignature(sourceUrl);
+  const candidatePath = urlPathSignature(candidate.productUrl || candidate.offerUrl);
+  if (sourcePath && candidatePath) {
+    if (sourcePath === candidatePath) score += 60;
+    else if (sourcePath.includes(candidatePath) || candidatePath.includes(sourcePath)) score += 35;
+  }
+
+  const contextTokens = tokenizeForSimilarity([titleFromUrl(sourceUrl), primaryHeading, pageTitle].join(' '));
+  const nameTokens = tokenizeForSimilarity(name);
+  let overlap = 0;
+  for (const token of nameTokens) {
+    if (contextTokens.has(token)) overlap += 1;
+  }
+  if (overlap) score += Math.min(70, overlap * 16);
+
+  if (/\b(related|similar|sponsored|recommended|collection|shop more)\b/i.test(name)) score -= 60;
+  return score;
+}
+
+function selectBestJsonLdProductCandidate(candidates, context = {}) {
+  let best = null;
+  let bestScore = Number.NEGATIVE_INFINITY;
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const score = scoreJsonLdProductCandidate(candidate, context);
+    if (!best || score > bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+function parseJsonLd(html, { sourceUrl = '', primaryHeading = '', pageTitle = '' } = {}) {
   const scripts = html.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script>/gi) || [];
   const aggregated = {
     name: '',
@@ -2113,63 +2270,50 @@ function parseJsonLd(html) {
     materials: [],
     specs: []
   };
+  const productCandidates = [];
 
-    for (const script of scripts) {
-      const contentMatch = script.match(/<script[^>]*>([\s\S]*?)<\/script>/i);
-      if (!contentMatch) continue;
+  for (const script of scripts) {
+    const contentMatch = script.match(/<script[^>]*>([\s\S]*?)<\/script>/i);
+    if (!contentMatch) continue;
+    const parsed = safeJsonParse(contentMatch[1].trim(), null);
+    if (!parsed) continue;
 
-      const parsed = safeJsonParse(contentMatch[1].trim(), null);
-      if (!parsed) continue;
+    const nodes = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed['@graph'])
+        ? parsed['@graph']
+        : [parsed];
 
-      const nodes = Array.isArray(parsed)
-        ? parsed
-        : Array.isArray(parsed['@graph'])
-          ? parsed['@graph']
-          : [parsed];
-
-      for (const node of nodes) {
-        if (!node || typeof node !== 'object') continue;
-        const type = String(node['@type'] || '').toLowerCase();
-        if (type.includes('product')) {
-        const offers = Array.isArray(node.offers) ? node.offers[0] : node.offers;
-        const rawImages = Array.isArray(node.image) ? node.image : node.image ? [node.image] : [];
-        const imageCandidates = rawImages
-          .map((entry) => resolveJsonLdImageCandidate(entry))
-          .filter(Boolean);
-        const image = imageCandidates[0];
-        const offerPrice =
-          offers?.price ||
-          offers?.lowPrice ||
-          offers?.highPrice;
-        if (!aggregated.name && node.name) aggregated.name = node.name;
-        if (!aggregated.brand && (node.brand?.name || node.brand)) aggregated.brand = node.brand?.name || node.brand;
-        if (!aggregated.image && image) aggregated.image = image;
-        if (!aggregated.seller && offers?.seller?.name) aggregated.seller = offers.seller.name;
-        if (!aggregated.price && offerPrice) {
-          aggregated.price = `${offers?.priceCurrency ? `${offers.priceCurrency} ` : ''}${offerPrice}`.trim();
+    for (const node of nodes) {
+      if (!node || typeof node !== 'object') continue;
+      const productCandidate = parseJsonLdProductNode(node);
+      if (productCandidate) {
+        productCandidates.push(productCandidate);
+        if (productCandidate.images.length) {
+          aggregated.images.push(...productCandidate.images);
         }
-        if (!aggregated.description && typeof node.description === 'string') {
-          aggregated.description = node.description;
-        }
-        if (typeof node.material === 'string') aggregated.materials.push(node.material);
-        if (Array.isArray(node.material)) aggregated.materials.push(...node.material);
-        if (typeof node.size === 'string') aggregated.dimensions.push(node.size);
-        if (typeof node.width === 'string') aggregated.dimensions.push(`Width ${node.width}`);
-        if (typeof node.height === 'string') aggregated.dimensions.push(`Height ${node.height}`);
-        if (typeof node.depth === 'string') aggregated.dimensions.push(`Depth ${node.depth}`);
-        if (typeof node.weight === 'string') aggregated.specs.push(`Weight: ${node.weight}`);
-        if (Array.isArray(node.additionalProperty)) {
-          for (const prop of node.additionalProperty) {
-            const key = prop?.name || prop?.propertyID || '';
-            const value = prop?.value || prop?.description || '';
-            if (key && value) aggregated.specs.push(`${key}: ${value}`);
-          }
-        }
-        if (imageCandidates.length) {
-          aggregated.images.push(...imageCandidates);
-        }
+        continue;
       }
+      const topImage = resolveJsonLdImageCandidate(node.image || node.thumbnailUrl || node.contentUrl || node.url);
+      if (topImage) aggregated.images.push(topImage);
     }
+  }
+
+  const selected = selectBestJsonLdProductCandidate(productCandidates, {
+    sourceUrl,
+    primaryHeading,
+    pageTitle
+  });
+  if (selected) {
+    aggregated.name = selected.name;
+    aggregated.brand = selected.brand;
+    aggregated.image = selected.image;
+    aggregated.seller = selected.seller;
+    aggregated.price = selected.price;
+    aggregated.description = selected.description;
+    aggregated.dimensions = normalizeDetailList(selected.dimensions, 8);
+    aggregated.materials = normalizeDetailList(selected.materials, 8);
+    aggregated.specs = normalizeDetailList(selected.specs, 12);
   }
 
   aggregated.images = Array.from(
@@ -2179,9 +2323,7 @@ function parseJsonLd(html) {
         .filter(Boolean)
     )
   );
-  aggregated.dimensions = Array.from(new Set(aggregated.dimensions.map((entry) => String(entry || '').trim()).filter(Boolean))).slice(0, 8);
-  aggregated.materials = Array.from(new Set(aggregated.materials.map((entry) => String(entry || '').trim()).filter(Boolean))).slice(0, 8);
-  aggregated.specs = Array.from(new Set(aggregated.specs.map((entry) => String(entry || '').trim()).filter(Boolean))).slice(0, 12);
+  if (!aggregated.image && aggregated.images.length) aggregated.image = aggregated.images[0];
   return aggregated;
 }
 
@@ -2212,13 +2354,16 @@ function looksLikeProductImage(url) {
     lower.includes('diagram') ||
     lower.includes('line-art') ||
     lower.includes('outline') ||
-    lower.includes('glyph')
+    lower.includes('glyph') ||
+    lower.includes('payment-credit-card')
   ) {
     return false;
   }
   try {
     const parsed = new URL(text);
     const path = parsed.pathname.toLowerCase();
+    const host = parsed.hostname.toLowerCase();
+    if (host.includes('contentgrid.thdstatic.com')) return false;
     if (/\.svg(?:$|\?)/i.test(path)) return false;
     if (/\/(?:icons?|logos?|sprites?|badges?)\//i.test(path)) return false;
     if (isAmazonHost(parsed.hostname)) {
@@ -2288,6 +2433,15 @@ function normalizeImageCandidateUrl(rawUrl) {
   } catch {
     return text;
   }
+}
+
+function isLikelyImageResourceUrl(rawUrl) {
+  const text = String(rawUrl || '').trim();
+  if (!text) return false;
+  return (
+    /\.(?:jpe?g|png|webp|avif)(?:$|[?#])/i.test(text) ||
+    /\/(?:productimages?|images?)\//i.test(text)
+  );
 }
 
 function isLikelyLowResThumbnail(rawUrl) {
@@ -2407,12 +2561,218 @@ function extractPriceFromText(text) {
   return normalizePrice(text);
 }
 
+function parseAmountFromNormalizedPrice(price) {
+  const match = String(price || '').match(/([0-9][0-9,]*(?:\.[0-9]{1,2})?)/);
+  if (!match) return NaN;
+  const value = Number(match[1].replace(/,/g, ''));
+  return Number.isFinite(value) ? value : NaN;
+}
+
+function scorePriceContext(context) {
+  const text = String(context || '').toLowerCase();
+  let score = 0;
+  if (/(current price|sale price|our price|now\s*[:=]|deal price|today(?:'s)? price|final price|price to pay|add to cart)/.test(text)) score += 34;
+  if (/(price|sale|deal|offer|discount|off\b|save\b)/.test(text)) score += 14;
+  if (/(list price|original price|regular price|was\s*\$|msrp|compare at|strike(?:through)?|crossed[- ]out)/.test(text)) score -= 34;
+  if (/(afterpay|klarna|affirm|installments?|payments?|per month|apr|financing)/.test(text)) score -= 58;
+  if (/(rewards?|service|installation|shipping|delivery|protection plan|warranty|membership)/.test(text)) score -= 24;
+  if (/(review|reviews|rating|stars?)/.test(text)) score -= 8;
+  return score;
+}
+
+function addPriceCandidate(out, {
+  raw = '',
+  baseScore = 0,
+  index = 0,
+  source = '',
+  context = '',
+  applyContextScore = true
+} = {}) {
+  const normalized = normalizePrice(raw);
+  if (!normalized) return;
+  let score = Number(baseScore) || 0;
+  if (applyContextScore) score += scorePriceContext(context);
+  const amount = parseAmountFromNormalizedPrice(normalized);
+  if (Number.isFinite(amount)) {
+    if (amount < 20) score -= 12;
+    if (amount > 20_000) score -= 40;
+  }
+  out.push({
+    price: normalized,
+    amount,
+    score,
+    index: Number.isFinite(index) ? index : 0,
+    source
+  });
+}
+
+function extractPriceCandidatesFromHtml(html) {
+  const text = String(html || '');
+  if (!text) return [];
+  const out = [];
+  const moneyRegex = /(?:US\$|CA\$|C\$|AU\$|A\$|\$|£|€)\s*[0-9][0-9,]*(?:\.[0-9]{1,2})?/gi;
+  let moneyMatch;
+  while ((moneyMatch = moneyRegex.exec(text)) !== null) {
+    const index = moneyMatch.index || 0;
+    const context = text.slice(Math.max(0, index - 70), Math.min(text.length, index + 110));
+    const left = text.slice(Math.max(0, index - 28), index).toLowerCase();
+    const right = text.slice(index + moneyMatch[0].length, Math.min(text.length, index + moneyMatch[0].length + 40)).toLowerCase();
+    let localBoost = 0;
+    if (/(price now|now[:\s]|current|our price|sale)/.test(left)) localBoost += 34;
+    if (/(was|list|regular|original|msrp)/.test(left)) localBoost -= 34;
+    if (/(in\s+\d+\s+payments?|\/mo|per month|apr)/.test(right)) localBoost -= 56;
+    if (/(off\b|save\b)/.test(right)) localBoost += 10;
+    addPriceCandidate(out, {
+      raw: moneyMatch[0],
+      baseScore: 44 + localBoost,
+      index,
+      source: 'html_money',
+      context
+    });
+  }
+  moneyRegex.lastIndex = 0;
+
+  const keyedPatterns = [
+    {
+      regex: /"(?:salePrice|currentPrice|finalPrice|ourPrice|displayPrice|priceToPay|priceAmount)"\s*:\s*"?([0-9]{1,7}(?:\.[0-9]{1,2})?)"?/gi,
+      score: 78,
+      source: 'html_keyed_primary'
+    },
+    {
+      regex: /"(?:price|amount)"\s*:\s*"?([0-9]{1,7}(?:\.[0-9]{1,2})?)"?/gi,
+      score: 54,
+      source: 'html_keyed_generic'
+    },
+    {
+      regex: /"(?:listPrice|regularPrice|originalPrice|wasPrice|msrp|strike(?:through)?Price)"\s*:\s*"?([0-9]{1,7}(?:\.[0-9]{1,2})?)"?/gi,
+      score: 28,
+      source: 'html_keyed_list'
+    }
+  ];
+  for (const pattern of keyedPatterns) {
+    let match;
+    while ((match = pattern.regex.exec(text)) !== null) {
+      const index = match.index || 0;
+      addPriceCandidate(out, {
+        raw: normalizePriceToken(match[1]),
+        baseScore: pattern.score,
+        index,
+        source: pattern.source,
+        applyContextScore: false
+      });
+    }
+    pattern.regex.lastIndex = 0;
+  }
+  return out;
+}
+
+function chooseBestPriceCandidate(candidates) {
+  const deduped = new Map();
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const key = String(candidate?.price || '').trim();
+    if (!key) continue;
+    const current = deduped.get(key);
+    if (!current || candidate.score > current.score || (candidate.score === current.score && candidate.index < current.index)) {
+      deduped.set(key, candidate);
+    }
+  }
+  return [...deduped.values()].sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (Number.isFinite(a.amount) && Number.isFinite(b.amount) && a.amount !== b.amount) return a.amount - b.amount;
+    return a.index - b.index;
+  })[0] || null;
+}
+
+function pickBestProductPrice({ finalUrl = '', html = '', meta = {}, jsonLd = {} } = {}) {
+  const candidates = [];
+  const currency = meta['product:price:currency'] || meta['og:price:currency'] || meta.pricecurrency || '';
+
+  addPriceCandidate(candidates, {
+    raw: jsonLd.price,
+    baseScore: 62,
+    source: 'jsonld'
+  });
+  if (meta['product:sale_price:amount']) {
+    addPriceCandidate(candidates, {
+      raw: `${currency} ${meta['product:sale_price:amount']}`.trim(),
+      baseScore: 78,
+      source: 'meta_sale'
+    });
+  }
+  if (meta['product:price:amount']) {
+    addPriceCandidate(candidates, {
+      raw: `${currency} ${meta['product:price:amount']}`.trim(),
+      baseScore: 66,
+      source: 'meta_product_amount'
+    });
+  }
+  if (meta['og:price:amount']) {
+    addPriceCandidate(candidates, {
+      raw: `${meta['og:price:currency'] || currency} ${meta['og:price:amount']}`.trim(),
+      baseScore: 58,
+      source: 'meta_og_amount'
+    });
+  }
+  addPriceCandidate(candidates, {
+    raw: meta['product:price'],
+    baseScore: 58,
+    source: 'meta_product_price'
+  });
+  if (meta.price) {
+    addPriceCandidate(candidates, {
+      raw: `${meta.pricecurrency || currency} ${meta.price}`.trim(),
+      baseScore: 70,
+      source: 'meta_itemprop_price'
+    });
+  }
+  if (meta['twitter:data1'] && /[$€£]|(?:USD|CAD|AUD|EUR|GBP|CHF|JPY|INR|MXN)/i.test(meta['twitter:data1'])) {
+    addPriceCandidate(candidates, {
+      raw: meta['twitter:data1'],
+      baseScore: 48,
+      source: 'meta_twitter'
+    });
+  }
+  if (isAmazonUrl(finalUrl)) {
+    addPriceCandidate(candidates, {
+      raw: extractAmazonPriceFromHtml(html),
+      baseScore: 86,
+      source: 'amazon_html'
+    });
+  }
+
+  candidates.push(...extractPriceCandidatesFromHtml(html));
+  const best = chooseBestPriceCandidate(candidates);
+  return best?.price || '';
+}
+
 function absoluteUrl(baseUrl, maybeRelative) {
   if (!maybeRelative) return '';
   try {
     return new URL(maybeRelative, baseUrl).toString();
   } catch {
     return maybeRelative;
+  }
+}
+
+function isHomeDepotUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return false;
+  try {
+    const host = new URL(raw).hostname.toLowerCase().replace(/^www\./, '');
+    return host === 'homedepot.com' || host.endsWith('.homedepot.com');
+  } catch {
+    return /(?:^|\.)homedepot\.com(?:$|\/)/i.test(raw);
+  }
+}
+
+function isLowesUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return false;
+  try {
+    const host = new URL(raw).hostname.toLowerCase().replace(/^www\./, '');
+    return host === 'lowes.com' || host.endsWith('.lowes.com');
+  } catch {
+    return /(?:^|\.)lowes\.com(?:$|\/)/i.test(raw);
   }
 }
 
@@ -2480,35 +2840,71 @@ function estimateImageQualityScore(rawUrl) {
 }
 
 function dedupeImageUrls(urls, max = 30) {
-  const buckets = new Map();
+  const highResBuckets = new Map();
+  const lowResBuckets = new Map();
   const out = [];
+  const upsertBucket = (bucket, key, url, score) => {
+    if (!bucket.has(key)) {
+      bucket.set(key, { url, score, firstSeen: bucket.size });
+      return;
+    }
+    const current = bucket.get(key);
+    if (score > current.score) {
+      bucket.set(key, { url, score, firstSeen: current.firstSeen });
+    }
+  };
+  const appendRanked = (bucket) => {
+    const ranked = Array.from(bucket.values()).sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return a.firstSeen - b.firstSeen;
+    });
+    for (const best of ranked) {
+      out.push(best.url);
+      if (out.length >= max) break;
+    }
+  };
+
   for (const entry of Array.isArray(urls) ? urls : []) {
     const candidate = normalizeImageCandidateUrl(entry);
     if (!candidate) continue;
     if (!/^https?:\/\//i.test(candidate)) continue;
     if (!looksLikeProductImage(candidate)) continue;
-    if (isLikelyLowResThumbnail(candidate)) continue;
     const key = canonicalImageKey(candidate);
     if (!key) continue;
     const score = estimateImageQualityScore(candidate);
-    if (!buckets.has(key)) {
-      buckets.set(key, { url: candidate, score, firstSeen: buckets.size });
+    if (isLikelyLowResThumbnail(candidate)) {
+      upsertBucket(lowResBuckets, key, candidate, score);
       continue;
     }
-    const current = buckets.get(key);
-    if (score > current.score) {
-      buckets.set(key, { url: candidate, score, firstSeen: current.firstSeen });
+    upsertBucket(highResBuckets, key, candidate, score);
+  }
+
+  appendRanked(highResBuckets);
+  if (out.length < max) {
+    const highKeys = new Set(out.map((entry) => canonicalImageKey(entry)).filter(Boolean));
+    const lowRanked = Array.from(lowResBuckets.values()).sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return a.firstSeen - b.firstSeen;
+    });
+    for (const candidate of lowRanked) {
+      const key = canonicalImageKey(candidate.url);
+      if (!key || highKeys.has(key)) continue;
+      out.push(candidate.url);
+      if (out.length >= max) break;
     }
   }
-  const ranked = Array.from(buckets.values()).sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score;
-    return a.firstSeen - b.firstSeen;
-  });
-  for (const best of ranked) {
-    out.push(best.url);
-    if (out.length >= max) break;
-  }
   return out;
+}
+
+function pinPrimaryImage(images, primaryImage) {
+  const normalized = dedupeImageUrls(images, 30);
+  const primary = normalizeImageCandidateUrl(primaryImage);
+  if (!primary) return normalized;
+  const primaryKey = canonicalImageKey(primary);
+  if (!primaryKey) return normalized;
+  const match = normalized.find((src) => canonicalImageKey(src) === primaryKey);
+  if (!match) return normalized;
+  return [match, ...normalized.filter((src) => src !== match)];
 }
 
 function parseSrcsetUrls(srcsetValue) {
@@ -2610,6 +3006,89 @@ function extractAmazonImageCandidatesFromHtml(html) {
   return dedupeImageUrls(out, 30);
 }
 
+function extractScriptImageCandidatesFromHtml(baseUrl, html) {
+  const out = [];
+  const push = (candidate) => {
+    if (!candidate) return;
+    const absolute = absoluteUrl(baseUrl, candidate);
+    if (!absolute) return;
+    if (!/^https?:\/\//i.test(absolute)) return;
+    if (!looksLikeProductImage(absolute)) return;
+    out.push(absolute);
+  };
+  const trustedContext = /(product|gallery|carousel|hero|zoom|main|primary|media|images?|sku|variant|pdp)/i;
+  const blockedContext = /(logo|sprite|icon|favicon|badge|avatar|swatch|captcha|perimeterx|analytics|tracking|doubleclick|adservice|pixel)/i;
+  const scriptRegex = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+  const imageUrlRegex = /(?:https?:\\?\/\\?|\\?\/\\?\/)[^"'\\\s<>()]+/gi;
+  const imageFieldRegex = /["'](?:image|imageUrl|mainImage|heroImage|primaryImage|zoomImage|largeImage|thumbnailUrl|src|url)["']\s*:\s*["']([^"']+)["']/gi;
+  let scriptMatch;
+  let collected = 0;
+  while ((scriptMatch = scriptRegex.exec(html)) !== null) {
+    const block = String(scriptMatch[1] || '');
+    let urlMatch;
+    while ((urlMatch = imageUrlRegex.exec(block)) !== null) {
+      const raw = String(urlMatch[0] || '')
+        .replace(/\\\//g, '/')
+        .replace(/\\u0026/gi, '&')
+        .replace(/^\/\//, 'https://');
+      if (!isLikelyImageResourceUrl(raw)) continue;
+      const index = urlMatch.index || 0;
+      const context = block.slice(Math.max(0, index - 140), Math.min(block.length, index + 180)).toLowerCase();
+      if (blockedContext.test(context)) continue;
+      if (!trustedContext.test(context) && !/\/productimages?\//i.test(raw)) continue;
+      push(raw);
+      collected += 1;
+      if (collected >= 160) break;
+    }
+    imageUrlRegex.lastIndex = 0;
+    if (collected >= 160) break;
+
+    let fieldMatch;
+    while ((fieldMatch = imageFieldRegex.exec(block)) !== null) {
+      const raw = String(fieldMatch[1] || '')
+        .replace(/\\\//g, '/')
+        .replace(/\\u0026/gi, '&')
+        .replace(/^\/\//, 'https://');
+      if (!isLikelyImageResourceUrl(raw)) continue;
+      const index = fieldMatch.index || 0;
+      const context = block.slice(Math.max(0, index - 140), Math.min(block.length, index + 180)).toLowerCase();
+      if (blockedContext.test(context)) continue;
+      if (!trustedContext.test(context) && !/\/productimages?\//i.test(raw)) continue;
+      push(raw);
+      collected += 1;
+      if (collected >= 160) break;
+    }
+    imageFieldRegex.lastIndex = 0;
+    if (collected >= 160) break;
+  }
+  return dedupeImageUrls(out, 30);
+}
+
+function extractHomeDepotProductImagesFromHtml(html = '') {
+  const out = [];
+  const push = (value) => {
+    const normalized = normalizeImageCandidateUrl(
+      String(value || '')
+        .replace(/\\\//g, '/')
+        .replace(/\\u0026/gi, '&')
+        .replace(/^\/\//, 'https://')
+    );
+    if (!normalized) return;
+    if (!/^https?:\/\//i.test(normalized)) return;
+    if (!/images\.thdstatic\.com\/productimages\//i.test(normalized)) return;
+    if (!looksLikeProductImage(normalized)) return;
+    out.push(normalized);
+  };
+
+  const directRegex = /(?:https?:\\\/\\\/|https?:\/\/|\\\/\\\/|\/\/)images\.thdstatic\.com(?:\\\/|\/)productImages(?:\\\/|\/)[^"'\\\s<>()]+/gi;
+  let match;
+  while ((match = directRegex.exec(html)) !== null) {
+    push(match[0]);
+  }
+
+  return dedupeImageUrls(out, 30);
+}
+
 function extractAmazonPriceFromHtml(html) {
   const candidates = [];
   const push = (raw, score = 0, index = 0) => {
@@ -2656,6 +3135,7 @@ function extractAmazonPriceFromHtml(html) {
 function collectImageCandidatesFromHtml(baseUrl, html, meta = {}, jsonLd = {}) {
   const out = [];
   const isAmazon = isAmazonUrl(baseUrl);
+  const isHomeDepot = isHomeDepotUrl(baseUrl);
   const push = (candidate) => {
     if (!candidate) return;
     const url = absoluteUrl(baseUrl, candidate);
@@ -2703,6 +3183,15 @@ function collectImageCandidatesFromHtml(baseUrl, html, meta = {}, jsonLd = {}) {
     const srcset = tag.match(srcsetAttr)?.[2] || tag.match(dataSrcsetAttr)?.[2] || '';
     for (const srcsetUrl of parseSrcsetUrls(srcset)) {
       push(srcsetUrl);
+    }
+  }
+
+  for (const candidate of extractScriptImageCandidatesFromHtml(baseUrl, html)) {
+    push(candidate);
+  }
+  if (isHomeDepot) {
+    for (const candidate of extractHomeDepotProductImagesFromHtml(html)) {
+      push(candidate);
     }
   }
 
@@ -2757,8 +3246,46 @@ function isLikelyBotBlockPage(html) {
     lower.includes('access to this page has been denied') ||
     lower.includes('px-captcha') ||
     lower.includes('perimeterx') ||
-    lower.includes('press & hold to confirm you are')
+    lower.includes('press & hold to confirm you are') ||
+    lower.includes('target url returned error 403') ||
+    lower.includes('<title>error page</title>') ||
+    lower.includes('how doers get more done')
   );
+}
+
+function isLikelyBlockedFallbackContent(text = '') {
+  const lower = String(text || '').toLowerCase();
+  if (!lower) return false;
+  return (
+    lower.includes('target url returned error 403') ||
+    lower.includes('target url returned error 429') ||
+    lower.includes('target url returned error 503') ||
+    lower.includes('title: error page') ||
+    lower.includes('source page is blocked by anti-bot protection') ||
+    lower.includes('access to this page has been denied') ||
+    lower.includes('perimeterx') ||
+    lower.includes('px-captcha') ||
+    lower.includes('how doers get more done') ||
+    lower.includes('forbidden')
+  );
+}
+
+function shouldRejectSparseRetailerProduct(product, sourceUrl = '') {
+  if (!isHomeDepotUrl(sourceUrl) && !isLowesUrl(sourceUrl)) return false;
+  const hasImages = Boolean(product?.image) || (Array.isArray(product?.images) && product.images.length > 0);
+  const hasPrice = Boolean(normalizePrice(product?.price || ''));
+  return !hasImages && !hasPrice;
+}
+
+function isRetailerHighFidelityPreferred(url = '') {
+  return isHomeDepotUrl(url) || isLowesUrl(url);
+}
+
+function hasStrongRetailerResult(product = {}) {
+  const imageCount = Array.isArray(product?.images) ? product.images.length : 0;
+  const hasPrimaryImage = Boolean(String(product?.image || '').trim());
+  const hasPrice = Boolean(normalizePrice(product?.price || ''));
+  return hasPrice && (imageCount >= 2 || hasPrimaryImage);
 }
 
 function titleFromUrl(rawUrl) {
@@ -2788,10 +3315,15 @@ function titleFromUrl(rawUrl) {
 function minimalFallbackFromUrl(rawUrl, highlights = []) {
   const url = new URL(rawUrl);
   const seller = url.hostname.replace(/^www\./, '');
+  const productTitleRaw = normalizeTitle(titleFromUrl(rawUrl));
   return {
     url: rawUrl,
     brand: '',
-    name: buildItemName(titleFromUrl(rawUrl), rawUrl),
+    brandRaw: '',
+    brandSource: 'unknown',
+    brandConfidence: 0,
+    productTitleRaw,
+    name: buildItemName(productTitleRaw, rawUrl),
     image: '',
     images: [],
     seller,
@@ -2846,6 +3378,27 @@ function isRetailerOnlyName(name) {
   return retailerNames.has(normalized);
 }
 
+function isRetailerToken(word) {
+  const token = String(word || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+  const retailerTokens = new Set([
+    'wayfair',
+    'allmodern',
+    'jossandmain',
+    'jossmain',
+    'birchlane',
+    'perigold',
+    'homedepot',
+    'lowes',
+    'target',
+    'walmart',
+    'amazon',
+    'ikea'
+  ]);
+  return retailerTokens.has(token);
+}
+
 function chooseBestNameCandidate(candidates, sourceUrl = '') {
   const host = (() => {
     try {
@@ -2880,6 +3433,634 @@ function chooseBestNameCandidate(candidates, sourceUrl = '') {
   return best;
 }
 
+function decodeExtendedHtmlEntities(text) {
+  const decoded = decodeHtmlEntities(String(text || ''))
+    .replace(/&nbsp;/gi, ' ');
+  return decoded
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([a-f0-9]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)));
+}
+
+function shouldNormalizeAllCaps(value) {
+  const letters = String(value || '').replace(/[^a-z]/gi, '');
+  if (letters.length < 5) return false;
+  return letters === letters.toUpperCase();
+}
+
+function dedupeAdjacentTokens(text) {
+  const tokens = String(text || '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  if (!tokens.length) return '';
+  const out = [];
+  let previous = '';
+  for (const token of tokens) {
+    const key = token.toLowerCase();
+    if (key && key === previous) continue;
+    out.push(token);
+    previous = key;
+  }
+  return out.join(' ');
+}
+
+function normalizeNameFragment(rawValue) {
+  let value = decodeExtendedHtmlEntities(rawValue)
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201c\u201d]/g, '"')
+    .replace(/[®™]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  value = value
+    .replace(/([|•:;])(?:\s*\1)+/g, '$1')
+    .replace(/\s*[-–—]{2,}\s*/g, ' - ')
+    .replace(/\s*([|•:;])\s*/g, ' $1 ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  value = value.replace(/^[|•:;,\-–—\s]+|[|•:;,\-–—\s]+$/g, '').trim();
+  if (shouldNormalizeAllCaps(value)) {
+    value = toTitleCase(value);
+  }
+  return dedupeAdjacentTokens(value);
+}
+
+function isLikelyMeaningfulBrandText(rawValue) {
+  const value = String(rawValue || '').replace(/\s+/g, ' ').trim();
+  if (!value) return false;
+  if (!/[a-z]/i.test(value)) return false;
+  if (/^(?:brand|manufacturer|unknown|none|n\/a|na)$/i.test(value)) return false;
+  if (/\b(?:add to cart|customer reviews?|free shipping|shop now|buy now|learn more|item details)\b/i.test(value)) return false;
+  if (/^[a-z0-9-]{9,}$/i.test(value) && /[a-z]/i.test(value) && /\d/.test(value)) return false;
+  const words = value.split(/\s+/).filter(Boolean);
+  if (words.length > 5) return false;
+  return true;
+}
+
+function normalizeTitle(rawTitle) {
+  let value = normalizeNameFragment(rawTitle);
+  value = cleanExtractedItemName(value);
+  value = value
+    .replace(/\s*(?:\||•|:)\s*(?:buy|shop)\b.*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  value = value.replace(/^[|•:;,\-–—\s]+|[|•:;,\-–—\s]+$/g, '').trim();
+  return dedupeAdjacentTokens(value);
+}
+
+function normalizeBrand(rawBrand) {
+  let value = normalizeNameFragment(rawBrand);
+  value = value
+    .replace(/^\s*(?:brand|manufacturer|made by|collection by|sold by)\s*[:\-]?\s*/i, '')
+    .replace(/^\s*by\s+/i, '')
+    .replace(/\s*\b(?:official|store|shop|site)\b\s*$/i, '')
+    .replace(/\s*\b(?:inc|llc|ltd|co)\.?$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  value = value.replace(/^[|•:;,\-–—\s]+|[|•:;,\-–—\s]+$/g, '').trim();
+  if (!isLikelyMeaningfulBrandText(value)) return '';
+  return dedupeAdjacentTokens(value);
+}
+
+function normalizeIdentityKey(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\.[a-z]{2,}(?:\/.*)?$/, '')
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9]+/g, '')
+    .trim();
+}
+
+function normalizeSellerKey(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return '';
+  let host = raw;
+  if (/^https?:\/\//i.test(raw) || raw.includes('.')) {
+    try {
+      const parsed = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+      host = parsed.hostname.toLowerCase();
+    } catch {
+      host = raw;
+    }
+  }
+  host = host.replace(/^www\./, '');
+  const compactHost = (host.split('.')[0] || host).replace(/[^a-z0-9]+/g, '');
+  const compactRaw = raw.replace(/[^a-z0-9]+/g, '');
+  const aliases = {
+    thehomedepot: 'homedepot',
+    homedepotcom: 'homedepot',
+    lowe: 'lowes',
+    lowescom: 'lowes',
+    jossmain: 'jossandmain',
+    jossandmain: 'jossandmain'
+  };
+  return aliases[compactHost] || aliases[compactRaw] || compactHost || compactRaw;
+}
+
+function clampConfidence(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.max(0, Math.min(1, number));
+}
+
+function scoreBrandSource(source) {
+  const key = String(source || '').trim().toLowerCase();
+  return Number(BRAND_SOURCE_CONFIDENCE[key] || 0);
+}
+
+function titleContainsBrand(productTitle, brand) {
+  const cleanTitle = normalizeTitle(productTitle);
+  const cleanBrand = normalizeBrand(brand);
+  if (!cleanTitle || !cleanBrand) return false;
+  const escaped = escapeRegExp(cleanBrand).replace(/\s+/g, '\\s+');
+  return new RegExp(`\\b${escaped}\\b`, 'i').test(cleanTitle);
+}
+
+function removeBrandFromTitle(productTitle, brand) {
+  const cleanTitle = normalizeTitle(productTitle);
+  const cleanBrand = normalizeBrand(brand);
+  if (!cleanTitle || !cleanBrand) return cleanTitle;
+
+  const escapedBrand = escapeRegExp(cleanBrand).replace(/\s+/g, '\\s+');
+  let working = cleanTitle
+    .replace(new RegExp(`^${escapedBrand}(?:\\b|\\s|[|•:;,\\-–—])+`, 'i'), '')
+    .replace(new RegExp(`(?:\\b|\\s|[|•:;,\\-–—])+${escapedBrand}$`, 'i'), '')
+    .replace(new RegExp(`\\bby\\s+${escapedBrand}\\b`, 'i'), '')
+    .replace(/^[|•:;,\-–—\s]+|[|•:;,\-–—\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const brandTokens = cleanBrand.toLowerCase().split(/\s+/).filter(Boolean);
+  const compareTokens = working.toLowerCase().split(/\s+/).filter(Boolean);
+  if (brandTokens.length && compareTokens.length > brandTokens.length) {
+    const startsWithBrand = brandTokens.every((token, idx) => compareTokens[idx] === token);
+    const endsWithBrand = brandTokens.every((token, idx) => compareTokens[compareTokens.length - brandTokens.length + idx] === token);
+    if (startsWithBrand) {
+      working = working.split(/\s+/).slice(brandTokens.length).join(' ').trim();
+    }
+    if (endsWithBrand && working) {
+      working = working.split(/\s+/).slice(0, Math.max(0, working.split(/\s+/).length - brandTokens.length)).join(' ').trim();
+    }
+  }
+
+  working = working.replace(/^[|•:;,\-–—\s]+|[|•:;,\-–—\s]+$/g, '').trim();
+  working = dedupeAdjacentTokens(working);
+  return working || cleanTitle;
+}
+
+function findSpecCutIndex(tokens = []) {
+  const list = Array.isArray(tokens) ? tokens : [];
+  const unitWords = new Set(['in', 'inch', 'inches', 'ft', 'foot', 'feet', 'cm', 'mm', 'light', 'lights', 'piece', 'pc', 'pack', 'count']);
+  for (let i = 0; i < list.length; i += 1) {
+    const current = String(list[i] || '').toLowerCase().replace(/[^a-z0-9.]+/g, '');
+    const next = String(list[i + 1] || '').toLowerCase().replace(/[^a-z0-9.]+/g, '');
+    if (!current) continue;
+    const hasDigit = /\d/.test(current);
+    if (!hasDigit) continue;
+    if (unitWords.has(next)) return i;
+    if (/^\d+(?:\.\d+)?(?:in|inch|inches|ft|cm|mm)$/.test(current)) return i;
+    if (/^\d+(?:\.\d+)?(?:light|lights|piece|pc|pack|count)$/.test(current)) return i;
+  }
+  return -1;
+}
+
+function detectNormalizedProductType(text = '') {
+  const value = String(text || '').toLowerCase();
+  const rules = [
+    [/\bflush mount\b/, 'Flush Mount'],
+    [/\bwall sconce\b/, 'Wall Sconce'],
+    [/\bpendant(?:\s+light)?\b/, 'Pendant Light'],
+    [/\bceiling light\b/, 'Ceiling Light'],
+    [/\bvanity light\b/, 'Vanity Light'],
+    [/\blight fixture\b/, 'Light Fixture'],
+    [/\bchandelier\b/, 'Chandelier'],
+    [/\bfaucet\b/, 'Faucet'],
+    [/\bnightstand\b/, 'Nightstand'],
+    [/\bbed frame\b/, 'Bed Frame'],
+    [/\btoilet\b/, 'Toilet'],
+    [/\bmirror\b/, 'Mirror'],
+    [/\brug\b/, 'Rug'],
+    [/\btable\b/, 'Table'],
+    [/\blamp\b/, 'Lamp']
+  ];
+  for (const [pattern, label] of rules) {
+    if (pattern.test(value)) return label;
+  }
+  const inferred = detectItemType(value);
+  return inferred ? toTitleCase(inferred) : '';
+}
+
+function extractFinishPhrase(text = '') {
+  const value = String(text || '');
+  const combo = value.match(/\b(brushed|matte|satin|polished|oil[- ]rubbed)\s+(brass|nickel|chrome|bronze|gold|black|white|steel)\b/i);
+  if (combo) {
+    return toTitleCase(`${combo[1].replace(/-/g, ' ')} ${combo[2]}`);
+  }
+  const colorOrder = ['white', 'black', 'gray', 'grey', 'brass', 'nickel', 'chrome', 'bronze', 'gold', 'silver', 'blue', 'green', 'brown', 'beige'];
+  const materialOrder = ['linen', 'metal', 'wood', 'acrylic', 'glass', 'steel'];
+  const picks = [];
+  const hasWord = (word) => new RegExp(`\\b${escapeRegExp(word)}\\b`, 'i').test(value);
+  const color = colorOrder.find((entry) => hasWord(entry));
+  const material = materialOrder.find((entry) => hasWord(entry));
+  if (color) picks.push(color);
+  if (material && material !== color) picks.push(material);
+  return picks.length ? toTitleCase(picks.join(' ')) : '';
+}
+
+function extractStyleDescriptor(text = '') {
+  const value = String(text || '').toLowerCase();
+  const styles = ['modern', 'industrial', 'farmhouse', 'vintage', 'rustic', 'traditional', 'minimalist'];
+  const found = styles.find((entry) => new RegExp(`\\b${escapeRegExp(entry)}\\b`, 'i').test(value));
+  return found ? toTitleCase(found) : '';
+}
+
+function stripTitleNoiseForFallback(text = '') {
+  return String(text || '')
+    .replace(/\b\d+(?:\.\d+)?\s*(?:in(?:ch(?:es)?)?|ft|feet|cm|mm|["'])\.?\b/gi, ' ')
+    .replace(/\b\d+\s*[- ]?\s*lights?\b/gi, ' ')
+    .replace(/\b\d+(?:\.\d+)?\s*(?:w|watt|watts)\b/gi, ' ')
+    .replace(/\b(?:model|sku|item|style|part|no\.?)\s*[:#-]?\s*[a-z0-9-]+\b/gi, ' ')
+    .replace(/\b[a-z]{0,4}\d{3,}[a-z0-9-]*\b/gi, ' ')
+    .replace(/\b(?:with|featuring|includes?|including|kit|set|led)\b/gi, ' ')
+    .replace(/[()]/g, ' ')
+    .replace(/[-–—/|,:;]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildFallbackTitleName(productTitle = '') {
+  const clean = normalizeTitle(productTitle);
+  if (!clean) return '';
+  const stripped = stripTitleNoiseForFallback(clean);
+  const source = stripped || clean;
+  const finish = extractFinishPhrase(source);
+  const type = detectNormalizedProductType(source) || detectNormalizedProductType(clean);
+  const descriptor = extractStyleDescriptor(source);
+  const sourceTokens = source.split(/\s+/).filter(Boolean);
+  const typeTokens = new Set(String(type || '').toLowerCase().split(/\s+/).filter(Boolean));
+  const leadingCandidate = sourceTokens.find((token) => {
+    const key = String(token || '').toLowerCase().replace(/[^a-z0-9'-]/g, '');
+    if (!key || key.length < 3) return false;
+    if (isRetailerToken(key)) return false;
+    if (typeTokens.has(key)) return false;
+    return true;
+  });
+
+  const tokens = [];
+  const pushPhrase = (value) => {
+    const words = String(value || '').split(/\s+/).filter(Boolean);
+    for (const word of words) {
+      tokens.push(word);
+      if (tokens.length >= 4) return;
+    }
+  };
+
+  pushPhrase(finish);
+  if (!finish && type && leadingCandidate) pushPhrase(toTitleCase(leadingCandidate));
+  pushPhrase(type);
+  if (tokens.length < 3) pushPhrase(descriptor);
+
+  if (!tokens.length) {
+    const fallbackTokens = source
+      .split(/\s+/)
+      .map((token) => token.replace(/[^a-z0-9'-]/gi, ''))
+      .filter(Boolean)
+      .filter((token) => !isRetailerToken(token))
+      .slice(0, 4)
+      .map((token) => toTitleCase(token));
+    return dedupeAdjacentTokens(fallbackTokens.join(' ')).trim();
+  }
+
+  const output = dedupeAdjacentTokens(tokens.join(' ')).trim();
+  return output ? toTitleCase(output) : '';
+}
+
+function isLikelyModelTokenForDisplay(token = '') {
+  const value = String(token || '').toLowerCase().replace(/[^a-z0-9'-]/g, '');
+  if (!value || value.length < 3) return false;
+  if (/\d/.test(value)) return false;
+  const blocked = new Set([
+    'white', 'black', 'gray', 'grey', 'brass', 'nickel', 'chrome', 'bronze', 'gold', 'silver',
+    'linen', 'metal', 'wood', 'acrylic', 'glass',
+    'modern', 'industrial', 'farmhouse', 'rustic', 'traditional',
+    'flush', 'mount', 'wall', 'sconce', 'pendant', 'light', 'fixture',
+    'faucet', 'toilet', 'mirror', 'rug', 'table', 'lamp', 'bed', 'frame',
+    'floor', 'ceiling', 'indoor', 'outdoor'
+  ]);
+  return !blocked.has(value);
+}
+
+function compactTitleForBrandDisplay(productTitle = '') {
+  const clean = normalizeTitle(productTitle);
+  if (!clean) return '';
+  const tokens = clean.split(/\s+/).filter(Boolean);
+  if (tokens.length <= 2) return clean;
+  const cutIndex = findSpecCutIndex(tokens);
+  const trimmed = cutIndex > 0 && cutIndex <= 3 ? tokens.slice(0, cutIndex).join(' ').trim() : clean;
+  if (!trimmed || isWeakName(trimmed) || isRetailerOnlyName(trimmed)) return clean;
+  const trimmedTokens = trimmed.split(/\s+/).filter(Boolean);
+  if (trimmedTokens.length <= 2) return trimmed;
+  const first = trimmedTokens[0];
+  if (isLikelyModelTokenForDisplay(first)) {
+    const normalizedType = detectNormalizedProductType(trimmed);
+    if (normalizedType && normalizedType.split(/\s+/).length === 1) {
+      return `${toTitleCase(first)} ${normalizedType}`;
+    }
+    return toTitleCase(first);
+  }
+  const fallback = buildFallbackTitleName(trimmed);
+  return fallback || trimmed;
+}
+
+function inferBrandFromProductTitle(productTitle = '', sellerName = '') {
+  const cleanTitle = normalizeTitle(productTitle);
+  const tokens = cleanTitle.split(/\s+/).filter(Boolean);
+  if (tokens.length < 4) return { brand: '', confidence: 0 };
+  if (findSpecCutIndex(tokens) < 0) return { brand: '', confidence: 0 };
+
+  const first = tokens[0] || '';
+  const second = tokens[1] || '';
+  const third = tokens[2] || '';
+  if (!/^[A-Z][A-Za-z&'-]{1,}$/.test(first)) return { brand: '', confidence: 0 };
+  if (!/^[A-Z][A-Za-z&'-]{1,}$/.test(second)) return { brand: '', confidence: 0 };
+  if (!/^[A-Z][A-Za-z0-9&'-]{2,}$/.test(third)) return { brand: '', confidence: 0 };
+
+  const inferredBrand = normalizeBrand(`${first} ${second}`);
+  if (!inferredBrand) return { brand: '', confidence: 0 };
+  if (isRetailerOnlyName(inferredBrand) || isBrandEquivalentToSeller(inferredBrand, sellerName)) {
+    return { brand: '', confidence: 0 };
+  }
+  const sellerKey = normalizeSellerKey(sellerName);
+  const confidence = MULTI_BRAND_SELLER_KEYS.has(sellerKey) ? 0.74 : 0.71;
+  return { brand: inferredBrand, confidence };
+}
+
+function isBrandEquivalentToSeller(brand, sellerName) {
+  const brandKey = normalizeIdentityKey(brand);
+  const sellerKey = normalizeSellerKey(sellerName) || normalizeIdentityKey(sellerName);
+  if (!brandKey || !sellerKey) return false;
+  if (brandKey === sellerKey) return true;
+  const minLength = Math.min(brandKey.length, sellerKey.length);
+  return minLength >= 4 && (brandKey.includes(sellerKey) || sellerKey.includes(brandKey));
+}
+
+function shouldAppendBrand({ sellerName = '', brand = '', productTitle = '', confidence = 0 } = {}) {
+  const cleanBrand = normalizeBrand(brand);
+  const cleanTitle = normalizeTitle(productTitle);
+  if (!cleanBrand || !cleanTitle) return false;
+  if (isWeakName(cleanTitle)) return false;
+
+  const brandConfidence = clampConfidence(confidence);
+  if (brandConfidence < BRAND_APPEND_CONFIDENCE_MIN) return false;
+  if (isBrandEquivalentToSeller(cleanBrand, sellerName)) return false;
+
+  const sellerKey = normalizeSellerKey(sellerName);
+  if (SINGLE_BRAND_SELLER_KEYS.has(sellerKey)) return false;
+  if (brandConfidence < BRAND_APPEND_CONFIDENCE_MIN) return false;
+
+  const titleWithoutBrand = removeBrandFromTitle(cleanTitle, cleanBrand);
+  if (!titleWithoutBrand || isWeakName(titleWithoutBrand)) return false;
+  const escapedBrand = escapeRegExp(cleanBrand).replace(/\s+/g, '\\s+');
+  if (new RegExp(`\\b${escapedBrand}\\b`, 'i').test(titleWithoutBrand)) return false;
+  return true;
+}
+
+function resolveUnifiedItemNameContext(product, sourceUrl = '') {
+  const productTitle = resolvePreferredProductTitle(product, sourceUrl);
+  let brand = normalizeBrand(product?.brandRaw || product?.brand || '');
+  let brandConfidence = resolveBrandConfidence({
+    explicitConfidence: product?.brandConfidence,
+    brandSource: product?.brandSource,
+    brand,
+    sellerName: product?.seller || '',
+    productTitle
+  });
+  if (!brand) {
+    const inferredBrand = inferBrandFromProductTitle(productTitle, product?.seller || '');
+    if (inferredBrand.brand) {
+      brand = inferredBrand.brand;
+      brandConfidence = Math.max(brandConfidence, clampConfidence(inferredBrand.confidence));
+    }
+  }
+  return {
+    productTitle,
+    brand,
+    brandConfidence
+  };
+}
+
+function generateUniversalItemName(product, sourceUrl = '') {
+  const context = resolveUnifiedItemNameContext(product, sourceUrl);
+  const formatted = formatItemName({
+    productTitle: context.productTitle,
+    brand: context.brand,
+    sellerName: product?.seller || '',
+    brandConfidence: context.brandConfidence
+  });
+  if (formatted && !isWeakName(formatted)) {
+    return truncateItemName(formatted);
+  }
+  const fallback = buildFallbackTitleName(context.productTitle || product?.name || titleFromUrl(sourceUrl));
+  if (fallback && !isWeakName(fallback)) return truncateItemName(fallback);
+  const fullName = buildItemName(context.productTitle || product?.name || titleFromUrl(sourceUrl), sourceUrl);
+  if (shouldPreferFullItemName(fullName, sourceUrl)) return fullName;
+  return truncateItemName(fullName || titleFromUrl(sourceUrl) || 'Untitled item');
+}
+
+function formatItemName({ productTitle = '', brand = '', sellerName = '', brandConfidence = 0 } = {}) {
+  // Default format item names as `Product Name by Manufacturer` when the manufacturer is confidently known and not redundant with the seller.
+  const cleanTitle = normalizeTitle(productTitle);
+  if (!cleanTitle) return '';
+  const cleanBrand = normalizeBrand(brand);
+  const titleWithoutBrand = removeBrandFromTitle(cleanTitle, cleanBrand);
+  const compactTitle = compactTitleForBrandDisplay(titleWithoutBrand || cleanTitle);
+  if (!cleanBrand) {
+    return truncateItemName(buildFallbackTitleName(titleWithoutBrand || cleanTitle) || titleWithoutBrand || cleanTitle);
+  }
+  if (!shouldAppendBrand({
+    sellerName,
+    brand: cleanBrand,
+    productTitle: compactTitle || titleWithoutBrand || cleanTitle,
+    confidence: brandConfidence
+  })) {
+    return truncateItemName(buildFallbackTitleName(titleWithoutBrand || cleanTitle) || titleWithoutBrand || cleanTitle);
+  }
+  return truncateItemName(`${compactTitle || titleWithoutBrand || cleanTitle} by ${cleanBrand}`);
+}
+
+function extractVisibleBrandCandidates(html = '') {
+  const text = decodeExtendedHtmlEntities(stripTags(html))
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!text) return [];
+  const out = [];
+  const push = (value, source, confidence) => {
+    const cleaned = normalizeBrand(
+      String(value || '')
+        .replace(/\s*(?:\||•|,|;).*/g, '')
+        .replace(/\s+\b(?:reviews?|rating|customer|item|sku|model|price|sale|ships?|shop|buy)\b.*$/i, '')
+        .trim()
+    );
+    if (!cleaned) return;
+    out.push({
+      raw: String(value || '').trim(),
+      brand: cleaned,
+      source,
+      confidence: clampConfidence(confidence)
+    });
+  };
+
+  const labeledPatterns = [
+    { pattern: /\bbrand\s*[:\-]\s*([a-z0-9][a-z0-9&'./() -]{1,80})/gi, source: 'visible_labeled', confidence: 0.88 },
+    { pattern: /\bmanufacturer\s*[:\-]\s*([a-z0-9][a-z0-9&'./() -]{1,80})/gi, source: 'visible_labeled', confidence: 0.88 },
+    { pattern: /\bcollection\s+by\s+([a-z0-9][a-z0-9&'./() -]{1,80})/gi, source: 'visible_labeled', confidence: 0.86 }
+  ];
+  for (const { pattern, source, confidence } of labeledPatterns) {
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      push(match[1], source, confidence);
+      if (out.length >= 12) return out;
+    }
+    pattern.lastIndex = 0;
+  }
+
+  const byPattern = /\bby\s+([a-z][a-z0-9&'./() -]{1,60})(?=\s*(?:\||•|,|(?:\d+\s+reviews?)|$))/gi;
+  let byMatch;
+  while ((byMatch = byPattern.exec(text)) !== null) {
+    push(byMatch[1], 'visible_byline', 0.82);
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+function extractProductTitle(doc, structuredData, metadata, { sourceUrl = '' } = {}) {
+  const candidates = [
+    { raw: parsePrimaryHeading(doc), source: 'h1', confidence: 0.98 },
+    { raw: structuredData?.name || '', source: 'json_ld', confidence: 0.92 },
+    { raw: metadata?.['og:title'] || '', source: 'metadata', confidence: 0.68 },
+    { raw: metadata?.['twitter:title'] || '', source: 'metadata', confidence: 0.66 },
+    { raw: parseTitle(doc), source: 'metadata', confidence: 0.6 },
+    { raw: titleFromUrl(sourceUrl), source: 'url', confidence: 0.45 }
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = normalizeTitle(candidate.raw);
+    if (!normalized || isWeakName(normalized) || isRetailerOnlyName(normalized)) continue;
+    return {
+      productTitleRaw: normalized,
+      productTitle: normalized,
+      source: candidate.source,
+      confidence: candidate.confidence
+    };
+  }
+
+  const fallbackRaw = chooseBestNameCandidate(candidates.map((entry) => entry.raw), sourceUrl) || titleFromUrl(sourceUrl) || 'Untitled item';
+  const fallbackNormalized = normalizeTitle(fallbackRaw) || buildItemName(fallbackRaw, sourceUrl);
+  return {
+    productTitleRaw: fallbackNormalized,
+    productTitle: fallbackNormalized,
+    source: 'fallback',
+    confidence: 0.4
+  };
+}
+
+function extractBrand(doc, structuredData, metadata, { sellerName = '', productTitle = '' } = {}) {
+  const candidates = [];
+  const addCandidate = (rawValue, source, confidence) => {
+    const brand = normalizeBrand(rawValue);
+    if (!brand) return;
+    candidates.push({
+      raw: String(rawValue || '').trim(),
+      brand,
+      source,
+      confidence: clampConfidence(confidence)
+    });
+  };
+
+  addCandidate(structuredData?.brand, 'json_ld', BRAND_SOURCE_CONFIDENCE.json_ld);
+  for (const visible of extractVisibleBrandCandidates(doc)) {
+    addCandidate(visible.raw, visible.source, visible.confidence);
+  }
+  const metadataBrandKeys = [
+    'product:brand',
+    'product:manufacturer',
+    'og:brand',
+    'brand',
+    'manufacturer'
+  ];
+  for (const key of metadataBrandKeys) {
+    addCandidate(metadata?.[key], 'metadata', BRAND_SOURCE_CONFIDENCE.metadata);
+  }
+
+  if (!candidates.length) {
+    return {
+      brandRaw: '',
+      brand: '',
+      source: 'unknown',
+      confidence: 0
+    };
+  }
+
+  let best = null;
+  let bestScore = Number.NEGATIVE_INFINITY;
+  for (const candidate of candidates) {
+    let score = candidate.confidence;
+    if (titleContainsBrand(productTitle, candidate.brand)) score += 0.05;
+    if (isBrandEquivalentToSeller(candidate.brand, sellerName)) score -= 0.04;
+    if (!best || score > bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
+  }
+
+  return {
+    brandRaw: best?.brand || '',
+    brand: best?.brand || '',
+    source: best?.source || 'unknown',
+    confidence: clampConfidence(best?.confidence || 0)
+  };
+}
+
+function resolveBrandConfidence({
+  explicitConfidence = 0,
+  brandSource = '',
+  brand = '',
+  sellerName = '',
+  productTitle = ''
+} = {}) {
+  const explicit = clampConfidence(explicitConfidence);
+  if (explicit > 0) return explicit;
+  const cleanBrand = normalizeBrand(brand);
+  if (!cleanBrand) return 0;
+  let confidence = scoreBrandSource(brandSource);
+  if (!confidence) confidence = BRAND_SOURCE_CONFIDENCE.unknown;
+  if (titleContainsBrand(productTitle, cleanBrand)) {
+    confidence = Math.max(confidence, 0.8);
+  }
+  if (isBrandEquivalentToSeller(cleanBrand, sellerName)) {
+    confidence = Math.max(confidence, 0.9);
+  }
+  return clampConfidence(confidence);
+}
+
+function resolvePreferredProductTitle(product, sourceUrl = '') {
+  const candidates = [
+    product?.productTitleRaw || '',
+    product?.name || '',
+    titleFromUrl(sourceUrl)
+  ];
+  const winner = chooseBestNameCandidate(candidates, sourceUrl) || candidates.find((entry) => String(entry || '').trim()) || '';
+  let normalized = normalizeTitle(winner);
+  if (!normalized || isWeakName(normalized) || isRetailerOnlyName(normalized) || isGenericTypeOnlyName(normalized)) {
+    const fromUrl = normalizeTitle(titleFromUrl(sourceUrl));
+    if (fromUrl && !isWeakName(fromUrl) && !isRetailerOnlyName(fromUrl)) {
+      normalized = fromUrl;
+    }
+  }
+  if (!normalized) {
+    normalized = buildItemName(winner || titleFromUrl(sourceUrl), sourceUrl);
+  }
+  return normalized;
+}
+
 function inferBrandFromName(name) {
   const text = String(name || '').replace(/[|].*$/, '').trim();
   if (!text) return '';
@@ -2912,7 +4093,7 @@ function inferBriefType(text) {
     [/\bvanity\b/, 'Vanity'],
     [/dining chair|patio chair|outdoor chair/, 'Dining Chair'],
     [/\bsofa\b|\bcouch\b/, 'Sofa'],
-    [/\btable\b/, 'Table'],
+    [/\b(?:patio|dining|coffee|console|side|end|accent|cocktail|entry|kitchen|bedside|writing)\s+table\b|\btable\s+(?:set|desk|top|base|legs)\b/, 'Table'],
     [/\bmirror\b/, 'Mirror'],
     [/\bfaucet\b/, 'Faucet'],
     [/\brug\b/, 'Rug'],
@@ -2928,7 +4109,8 @@ function detectItemType(text) {
   const value = String(text || '').toLowerCase();
   const rules = [
     [/\bwall oven\b|\boven\b/, 'Oven'],
-    [/\bpatio table\b|\bdining table\b|\bcoffee table\b|\bconsole table\b|\btable\b/, 'Table'],
+    [/\btable lamp\b|\bfloor lamp\b|\bceiling light\b|\bflush mount\b|\blight fixture\b|\blamp\b/, 'Light Fixture'],
+    [/\b(?:patio|dining|coffee|console|side|end|accent|cocktail|entry|kitchen|bedside|writing)\s+table\b|\btable\s+(?:set|desk|top|base|legs)\b/, 'Table'],
     [/\brug\b/, 'Rug'],
     [/\bvanity\b/, 'Vanity'],
     [/\bchair\b/, 'Chair'],
@@ -2941,7 +4123,6 @@ function detectItemType(text) {
     [/\bdresser\b/, 'Dresser'],
     [/\bbed\b/, 'Bed'],
     [/\bdesk\b/, 'Desk'],
-    [/\blamp\b|\blight fixture\b/, 'Light Fixture'],
     [/\brefrigerator\b|\bfridge\b/, 'Refrigerator'],
     [/\bdishwasher\b/, 'Dishwasher']
   ];
@@ -2990,7 +4171,8 @@ function detectQuantity(text) {
 function extractModelToken(text) {
   const stop = new Set([
     'outdoor', 'indoor', 'dining', 'table', 'chair', 'sofa', 'rug', 'oven', 'vanity', 'set',
-    'piece', 'rectangular', 'round', 'with', 'umbrella', 'hole', 'light', 'dark', 'wood',
+    'piece', 'rectangular', 'round', 'with', 'umbrella', 'hole', 'light', 'led', 'flush', 'mount',
+    'fixture', 'ceiling', 'chandelier', 'pendant', 'dark', 'wood',
     'teak', 'eucalyptus', 'aluminum', 'metal', 'modern', 'collection', 'and', 'for', 'the',
     'wayfair', 'allmodern', 'all', 'joss', 'main', 'jossandmain', 'birchlane', 'birch',
     'lane', 'perigold', 'hand', 'tufted', 'wool', 'area', 'rectangle', 'square', 'runner'
@@ -3165,6 +4347,33 @@ function collectCompactNameDescriptors(text) {
   return out;
 }
 
+function isGenericTypeOnlyName(value) {
+  const normalized = String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized) return true;
+  const generic = new Set([
+    'table', 'chair', 'sofa', 'rug', 'vanity', 'mirror', 'faucet', 'toilet', 'sink', 'cabinet',
+    'dresser', 'bed', 'desk', 'refrigerator', 'dishwasher', 'lamp', 'light', 'light fixture',
+    'flush mount', 'patio table'
+  ]);
+  return generic.has(normalized);
+}
+
+function extractDistinctiveModelFromUrl(sourceUrl = '', { brand = '', seller = '' } = {}) {
+  const token = extractModelToken(titleFromUrl(sourceUrl));
+  if (!token) return '';
+  if (isGenericTypeOnlyName(token)) return '';
+  const blocked = new Set([
+    ...splitHintTokens(brand),
+    ...splitHintTokens(seller),
+    ...splitHintTokens(hostFromUrl(sourceUrl))
+  ]);
+  return blocked.has(token.toLowerCase()) ? '' : token;
+}
+
 function buildHeuristicCompactItemName(product, sourceUrl = '') {
   const brandHint = String(product?.brand || inferBrandFromName(product?.name || '')).trim();
   const hints = [
@@ -3182,12 +4391,29 @@ function buildHeuristicCompactItemName(product, sourceUrl = '') {
   });
   const type = detectItemType(hintText) || detectItemType(product?.name || '') || detectItemType(titleFromUrl(sourceUrl));
   const descriptors = collectCompactNameDescriptors(hintText);
+  const modelFromUrl = extractDistinctiveModelFromUrl(sourceUrl, {
+    brand: brandHint,
+    seller: product?.seller || ''
+  });
+  const blockedModelTokens = new Set([
+    ...splitHintTokens(brandHint),
+    ...splitHintTokens(product?.seller || ''),
+    ...splitHintTokens(hostFromUrl(sourceUrl))
+  ]);
+  const modelFromNameRaw = extractModelToken(product?.name || '');
+  const modelFromName = blockedModelTokens.has(modelFromNameRaw.toLowerCase()) ? '' : modelFromNameRaw;
   let compact = base;
-  if (!compact || compact.split(/\s+/).length > 7) {
-    compact = [...descriptors.slice(0, 2), type].filter(Boolean).join(' ');
+  if (!compact || isGenericTypeOnlyName(compact)) {
+    if (modelFromUrl) {
+      compact = modelFromUrl;
+    } else {
+      compact = [modelFromName, ...descriptors.slice(0, 1), type].filter(Boolean).join(' ');
+    }
+  } else if (compact.split(/\s+/).length > 7) {
+    compact = [modelFromName, ...descriptors.slice(0, 1), type].filter(Boolean).join(' ') || compact;
   }
   if (!compact) {
-    compact = base || cleanExtractedItemName(titleFromUrl(sourceUrl)) || 'Untitled item';
+    compact = modelFromUrl || base || cleanExtractedItemName(titleFromUrl(sourceUrl)) || 'Untitled item';
   }
   const normalized = normalizeCompactItemNameCandidate(compact, {
     brand: brandHint,
@@ -3195,6 +4421,8 @@ function buildHeuristicCompactItemName(product, sourceUrl = '') {
     sourceUrl,
     typeHint: hintText
   });
+  if (normalized && !isGenericTypeOnlyName(normalized)) return normalized;
+  if (modelFromUrl) return modelFromUrl;
   return normalized || (type ? toTitleCase(type) : 'Untitled item');
 }
 
@@ -3272,6 +4500,10 @@ async function requestAiCompactItemName(product, sourceUrl, fallbackName) {
 
 async function pickCompactItemName(product, sourceUrl = '') {
   const brandHint = String(product?.brand || inferBrandFromName(product?.name || '')).trim();
+  const modelFromUrl = extractDistinctiveModelFromUrl(sourceUrl, {
+    brand: brandHint,
+    seller: product?.seller || ''
+  });
   const fallback = buildHeuristicCompactItemName(product, sourceUrl);
   const aiName = await requestAiCompactItemName(product, sourceUrl, fallback);
   const normalizedAi = normalizeCompactItemNameCandidate(aiName, {
@@ -3280,8 +4512,30 @@ async function pickCompactItemName(product, sourceUrl = '') {
     sourceUrl,
     typeHint: [product?.name || '', product?.description || '', ...(product?.specs || [])].join(' ')
   });
-  if (normalizedAi && !isWeakName(normalizedAi)) return normalizedAi;
-  return fallback;
+  if (normalizedAi && !isWeakName(normalizedAi)) {
+    if (!isGenericTypeOnlyName(normalizedAi) || !modelFromUrl) return normalizedAi;
+    return modelFromUrl;
+  }
+  if (fallback && !isGenericTypeOnlyName(fallback)) return fallback;
+  return modelFromUrl || fallback;
+}
+
+function shouldPreferFullItemName(name, sourceUrl = '') {
+  const clean = String(name || '').replace(/\s+/g, ' ').trim();
+  if (!clean || isWeakName(clean)) return false;
+  if (isGenericTypeOnlyName(clean)) return false;
+  if (/(add to cart|free shipping|customer reviews?|shop now|buy now|see details|learn more)/i.test(clean)) return false;
+  const words = clean.split(/\s+/).filter(Boolean);
+  if (words.length > 24) return false;
+  if (words.length === 1) {
+    const token = words[0];
+    return token.length >= 4 && /[a-z]/i.test(token) && !isRetailerToken(token);
+  }
+  return true;
+}
+
+async function pickFinalItemName(product, sourceUrl = '') {
+  return generateUniversalItemName(product, sourceUrl);
 }
 
 function buildItemName(rawName, sourceUrl = '') {
@@ -3306,6 +4560,7 @@ function cleanExtractedItemName(value) {
     .replace(/\s*:\s*(?:toys?\s*&\s*games?|home\s*&\s*kitchen|sports?\s*&\s*outdoors?)\s*$/i, '')
     .replace(/^(all\s*modern|allmodern|wayfair|joss\s*&?\s*main|jossandmain|birch\s*lane|birchlane|perigold|amazon(?:\.com)?)\b[\s,:-]*/i, '')
     .replace(/^\s*by\s+[a-z0-9&' -]+\s*[:|-]\s*/i, '')
+    .replace(/\b[a-z]{0,3}\d{5,}\b/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -3682,12 +4937,6 @@ function collectShortFeatureTags(text) {
     if (pattern.test(value)) matches.push(label);
   }
 
-  const dimensionMatches = value.match(/\b(\d{2,3})(?:\s|-)?(in|inch|inches)\b/gi) || [];
-  for (const raw of dimensionMatches) {
-    const m = raw.match(/(\d{2,3})/);
-    if (m) matches.push(`${m[1]} Inch`);
-  }
-
   const directionalDimensions = value.match(/(\d{2,3}(?:\.\d+)?)\s*(?:\"|in|inch|inches)\s*(l|w|h|d|length|width|height|depth)\b/gi) || [];
   for (const raw of directionalDimensions) {
     const m = raw.match(/(\d{2,3}(?:\.\d+)?)\s*(?:\"|in|inch|inches)\s*(l|w|h|d|length|width|height|depth)\b/i);
@@ -3811,7 +5060,8 @@ function collectSpecsFromHtml(html) {
     const text = decodeHtmlEntities(stripTags(match[1]));
     if (!text) continue;
     if (text.length < 12) continue;
-    if (/(shipping|returns|warranty|customer reviews|faq|financing)/i.test(text)) continue;
+    if (/(shipping|returns|warranty|customer reviews|faq|financing|afterpay|klarna|affirm|add to cart|get it by|free fast delivery|professional installation|see details|sold in|reviews?\b|rating\b)/i.test(text)) continue;
+    if (/(?:US\$|CA\$|C\$|AU\$|A\$|\$|£|€)\s*[0-9]/.test(text)) continue;
     const isStructured = /(inch|inches|cm|mm|material|finish|weight|capacity|depth|width|height|dimension)/i.test(text);
     const isNarrative = text.length >= 35 &&
       /(includes?|comes with|designed|portable|safe|non-toxic|ideal|perfect|gift|kids|children|easy|durable|feature|great for|screen[- ]?free|assembly|storage)/i.test(text);
@@ -4037,6 +5287,25 @@ function mergeProducts(base, candidate) {
   if (isWeakName(merged.name) && candidate.name) {
     merged.name = candidate.name;
   }
+  if ((!merged.productTitleRaw || isWeakName(merged.productTitleRaw)) && candidate.productTitleRaw) {
+    merged.productTitleRaw = candidate.productTitleRaw;
+  }
+  if ((!merged.brand || !normalizeBrand(merged.brand)) && candidate.brand) {
+    merged.brand = candidate.brand;
+  }
+  if (!merged.brandRaw && candidate.brandRaw) {
+    merged.brandRaw = candidate.brandRaw;
+  }
+  const mergedBrandConfidence = clampConfidence(merged.brandConfidence);
+  const candidateBrandConfidence = clampConfidence(candidate.brandConfidence);
+  if (candidateBrandConfidence > mergedBrandConfidence) {
+    merged.brandConfidence = candidateBrandConfidence;
+    if (candidate.brand) merged.brand = candidate.brand;
+    if (candidate.brandRaw) merged.brandRaw = candidate.brandRaw;
+    if (candidate.brandSource) merged.brandSource = candidate.brandSource;
+  } else if (!merged.brandSource && candidate.brandSource) {
+    merged.brandSource = candidate.brandSource;
+  }
   if ((!merged.seller || merged.seller === 'unknown') && candidate.seller) {
     merged.seller = candidate.seller;
   }
@@ -4083,7 +5352,18 @@ function sanitizeProduct(product, sourceUrl) {
   if (!sanitized.seller) {
     sanitized.seller = new URL(sourceUrl).hostname.replace(/^www\./, '');
   }
-  sanitized.name = buildItemName(sanitized.name, sourceUrl);
+  sanitized.productTitleRaw = normalizeTitle(sanitized.productTitleRaw || sanitized.name || titleFromUrl(sourceUrl));
+  sanitized.brandRaw = normalizeBrand(sanitized.brandRaw || sanitized.brand || '');
+  sanitized.brand = normalizeBrand(sanitized.brand || sanitized.brandRaw || '');
+  sanitized.brandSource = String(sanitized.brandSource || (sanitized.brand ? 'unknown' : '')).trim() || 'unknown';
+  sanitized.brandConfidence = resolveBrandConfidence({
+    explicitConfidence: sanitized.brandConfidence,
+    brandSource: sanitized.brandSource,
+    brand: sanitized.brand,
+    sellerName: sanitized.seller,
+    productTitle: sanitized.productTitleRaw || sanitized.name
+  });
+  sanitized.name = buildItemName(sanitized.productTitleRaw || sanitized.name, sourceUrl);
   if (!Array.isArray(sanitized.highlights)) sanitized.highlights = [];
   if (!sanitized.highlights.length) {
     sanitized.highlights = generateHighlights({
@@ -4143,28 +5423,47 @@ async function fetchPage(targetUrl) {
 
 async function extractFromHtml(finalUrl, html) {
   const meta = parseMetaTags(html);
-  const jsonLd = parseJsonLd(html);
+  const primaryHeading = parsePrimaryHeading(html);
+  const pageTitle = parseTitle(html);
+  const jsonLd = parseJsonLd(html, {
+    sourceUrl: finalUrl,
+    primaryHeading,
+    pageTitle
+  });
   const host = new URL(finalUrl).hostname.replace(/^www\./, '');
-
-  const scrapedName = chooseBestNameCandidate(
-    [
-      parsePrimaryHeading(html),
-      jsonLd.name,
-      meta['og:title'],
-      meta['twitter:title'],
-      parseTitle(html),
-      titleFromUrl(finalUrl)
-    ],
-    finalUrl
-  ) || 'Untitled item';
+  const seller = host;
+  const titleSelection = extractProductTitle(html, jsonLd, meta, { sourceUrl: finalUrl });
+  const productTitleRaw = titleSelection.productTitleRaw;
+  const productTitle = titleSelection.productTitle;
+  const brandSelection = extractBrand(html, jsonLd, meta, {
+    sellerName: seller,
+    productTitle
+  });
+  const brandRaw = brandSelection.brandRaw;
+  const brand = brandSelection.brand;
+  const brandSource = brandSelection.source;
+  const brandConfidence = resolveBrandConfidence({
+    explicitConfidence: brandSelection.confidence,
+    brandSource,
+    brand,
+    sellerName: seller,
+    productTitle
+  });
+  const extractedName = generateUniversalItemName({
+    productTitleRaw,
+    name: productTitle,
+    brand,
+    brandRaw,
+    brandSource,
+    brandConfidence,
+    seller
+  }, finalUrl);
 
   const candidateImage = jsonLd.image || meta['og:image'] || meta['twitter:image'] || '';
   const imageCandidateUrl = normalizeImageCandidateUrl(absoluteUrl(finalUrl, candidateImage));
   const image = looksLikeProductImage(imageCandidateUrl) ? imageCandidateUrl : '';
   const images = collectImageCandidatesFromHtml(finalUrl, html, meta, jsonLd);
 
-  const seller = host;
-  const brand = jsonLd.brand || meta['product:brand'] || meta['og:brand'] || '';
   const description = jsonLd.description || meta.description || meta['og:description'] || meta['twitter:description'] || '';
   const specs = collectSpecsFromHtml(html);
   const dimensions = normalizeDetailList([
@@ -4176,19 +5475,12 @@ async function extractFromHtml(finalUrl, html) {
     ...collectMaterialsFromText(`${description} ${specs.join(' ')}`)
   ], 8);
   const detailSections = collectDetailSectionsFromHtml(html);
-
-  const rawPrice = jsonLd.price
-    ? jsonLd.price
-    : meta['product:price:amount']
-      ? `${meta['product:price:currency'] || ''} ${meta['product:price:amount'] || ''}`.trim()
-      : meta['og:price:amount']
-        ? `${meta['og:price:currency'] || ''} ${meta['og:price:amount']}`.trim()
-        : meta['product:price']
-          ? meta['product:price']
-          : meta['twitter:data1'] && /[$€£]/.test(meta['twitter:data1'])
-            ? meta['twitter:data1']
-            : '';
-  const price = normalizePrice(rawPrice) || (isAmazonUrl(finalUrl) ? extractAmazonPriceFromHtml(html) : '');
+  const price = pickBestProductPrice({
+    finalUrl,
+    html,
+    meta,
+    jsonLd
+  });
 
   const accessibleImage = await findAccessibleImage([image, ...images]);
   const featuredImages = pinPrimaryImage([accessibleImage, ...images], accessibleImage || images[0] || '');
@@ -4196,7 +5488,11 @@ async function extractFromHtml(finalUrl, html) {
   return {
     url: finalUrl,
     brand,
-    name: buildItemName(scrapedName, finalUrl),
+    brandRaw,
+    brandSource,
+    brandConfidence,
+    productTitleRaw,
+    name: extractedName,
     image: featuredImages[0] || '',
     images: featuredImages,
     seller,
@@ -4207,7 +5503,7 @@ async function extractFromHtml(finalUrl, html) {
     specs,
     detailSections,
     highlights: generateHighlights({
-      name: scrapedName,
+      name: productTitle || extractedName,
       descriptionText: [description, specs.join('. ')].filter(Boolean).join('. '),
       specs
     })
@@ -4228,12 +5524,18 @@ async function extractViaMicrolink(targetUrl) {
 
   const payload = safeJsonParse(await response.text(), {});
   const data = payload?.data || {};
+  const blockedSignals = [data?.title, data?.description, data?.publisher].filter(Boolean).join(' ');
+  if (isLikelyBlockedFallbackContent(blockedSignals)) {
+    throw new ExtractError('Microlink returned blocked/invalid page content.', 422);
+  }
   const finalUrl = data.url || targetUrl;
   const base = minimalFallbackFromUrl(finalUrl);
+  const productTitleRaw = normalizeTitle(String(data.title || base.productTitleRaw || '').trim());
 
   return {
     ...base,
-    name: buildItemName(data.title || base.name, finalUrl),
+    productTitleRaw,
+    name: buildItemName(productTitleRaw || base.name, finalUrl),
     image: looksLikeProductImage(data.image?.url)
       ? data.image?.url || ''
       : looksLikeProductImage(data.screenshot?.url)
@@ -4290,6 +5592,37 @@ async function extractViaZyte(targetUrl) {
   const product = payload?.product || {};
   const finalUrl = product.url || payload?.url || targetUrl;
   const base = minimalFallbackFromUrl(finalUrl);
+  const browserHtml = typeof payload?.browserHtml === 'string' ? payload.browserHtml : '';
+  const browserMeta = browserHtml ? parseMetaTags(browserHtml) : {};
+  const browserPrimaryHeading = browserHtml ? parsePrimaryHeading(browserHtml) : '';
+  const browserPageTitle = browserHtml ? parseTitle(browserHtml) : '';
+  const browserJsonLd = browserHtml
+    ? parseJsonLd(browserHtml, {
+      sourceUrl: finalUrl,
+      primaryHeading: browserPrimaryHeading,
+      pageTitle: browserPageTitle
+    })
+    : {};
+  const browserTitleSelection = browserHtml
+    ? extractProductTitle(browserHtml, browserJsonLd, browserMeta, { sourceUrl: finalUrl })
+    : { productTitleRaw: '' };
+  const browserBrandSelection = browserHtml
+    ? extractBrand(browserHtml, browserJsonLd, browserMeta, {
+      sellerName: base.seller,
+      productTitle: browserTitleSelection.productTitleRaw || ''
+    })
+    : { brand: '', brandRaw: '', source: 'unknown', confidence: 0 };
+  const browserImages = browserHtml
+    ? collectImageCandidatesFromHtml(finalUrl, browserHtml, browserMeta, browserJsonLd)
+    : [];
+  const browserPrice = browserHtml
+    ? pickBestProductPrice({
+      finalUrl,
+      html: browserHtml,
+      meta: browserMeta,
+      jsonLd: browserJsonLd
+    })
+    : '';
 
   const mainImage = product?.mainImage?.url;
   const imageFromArray = Array.isArray(product?.images) ? product.images[0]?.url : '';
@@ -4304,11 +5637,35 @@ async function extractViaZyte(targetUrl) {
     product?.brand ||
     product?.brandName ||
     product?.manufacturer ||
+    browserBrandSelection.brand ||
     '';
+  const productTitleRaw = normalizeTitle(
+    String(product?.name || browserTitleSelection.productTitleRaw || base.productTitleRaw || '').trim()
+  );
+  const normalizedBrand = normalizeBrand(typeof brand === 'string' ? brand : '');
+  const brandSource = normalizedBrand ? 'json_ld' : 'unknown';
+  const brandConfidence = resolveBrandConfidence({
+    explicitConfidence: clampConfidence(
+      normalizedBrand
+        ? Math.max(
+          BRAND_SOURCE_CONFIDENCE.json_ld,
+          Number(browserBrandSelection?.confidence || 0)
+        )
+        : 0
+    ),
+    brandSource: normalizedBrand && browserBrandSelection?.source
+      ? browserBrandSelection.source
+      : brandSource,
+    brand: normalizedBrand,
+    sellerName: base.seller,
+    productTitle: productTitleRaw
+  });
 
   const priceRaw = product?.price || product?.regularPrice || '';
   const currency = product?.currencyRaw || product?.currency || '';
-  const price = priceRaw ? `${currency ? `${currency} ` : ''}${priceRaw}`.trim() : '';
+  const price = priceRaw
+    ? `${currency ? `${currency} ` : ''}${priceRaw}`.trim()
+    : browserPrice;
 
   const specTexts = [
     ...(Array.isArray(product?.specifications) ? product.specifications.map(specToText) : []),
@@ -4317,10 +5674,14 @@ async function extractViaZyte(targetUrl) {
 
   return {
     ...base,
-    brand: typeof brand === 'string' ? brand : '',
-    name: buildItemName(product?.name || base.name, finalUrl),
-    image: looksLikeProductImage(imageCandidate) ? imageCandidate : '',
-    images: dedupeImageUrls([imageCandidate, ...images], 30),
+    brand: normalizedBrand,
+    brandRaw: normalizedBrand,
+    brandSource,
+    brandConfidence,
+    productTitleRaw,
+    name: buildItemName(productTitleRaw || base.name, finalUrl),
+    image: looksLikeProductImage(imageCandidate) ? imageCandidate : (browserImages[0] || ''),
+    images: dedupeImageUrls([imageCandidate, ...images, ...browserImages], 30),
     seller: base.seller,
     price,
     description: String(product?.description || '').replace(/\s+/g, ' ').trim(),
@@ -4355,15 +5716,20 @@ async function extractViaJinaAi(targetUrl) {
   }
 
   const text = await response.text();
+  if (isLikelyBlockedFallbackContent(text)) {
+    throw new ExtractError('Jina mirror returned blocked/invalid page content.', 422);
+  }
   const base = minimalFallbackFromUrl(targetUrl);
 
   const titleMatch = text.match(/^Title:\s*(.+)$/im);
+  const productTitleRaw = normalizeTitle(titleMatch ? titleMatch[1].trim() : base.productTitleRaw || '');
   const imageMatch = text.match(/!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/i);
   const allImageMatches = Array.from(text.matchAll(/!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/gi)).map((m) => m[1]);
 
   return {
     ...base,
-    name: buildItemName(titleMatch ? titleMatch[1].trim() : base.name, targetUrl),
+    productTitleRaw,
+    name: buildItemName(productTitleRaw || base.name, targetUrl),
     image: imageMatch && looksLikeProductImage(imageMatch[1]) ? imageMatch[1] : '',
     images: dedupeImageUrls(allImageMatches, 30),
     price: extractPriceFromText(text),
@@ -4372,7 +5738,7 @@ async function extractViaJinaAi(targetUrl) {
     materials: collectMaterialsFromText(text),
     specs: normalizeDetailList(splitToSentences(text).filter((line) => /(?:inch|inches|cm|mm|material|capacity|weight|dimension|width|height|depth)/i.test(line)).slice(0, 10), 10),
     highlights: generateHighlights({
-      name: titleMatch ? titleMatch[1].trim() : base.name,
+      name: productTitleRaw || base.name,
       descriptionText: text
     })
     ,
@@ -4383,6 +5749,42 @@ async function extractViaJinaAi(targetUrl) {
 async function enrichProductData(targetUrl, baseProduct) {
   let product = baseProduct;
   if (!needsEnrichment(product)) return product;
+
+  if (isRetailerHighFidelityPreferred(targetUrl)) {
+    let zyteError = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const candidate = await extractViaZyte(targetUrl);
+        product = mergeProducts(product, candidate);
+        if (hasStrongRetailerResult(product) || !needsEnrichment(product)) {
+          return product;
+        }
+      } catch (error) {
+        zyteError = error;
+      }
+    }
+
+    // If Zyte is temporarily degraded, fall back to secondary providers to keep partial results flowing.
+    const secondaryFallbacks = [extractViaMicrolink, extractViaJinaAi];
+    for (const fallback of secondaryFallbacks) {
+      if (!needsEnrichment(product)) break;
+      try {
+        const candidate = await fallback(targetUrl);
+        product = mergeProducts(product, candidate);
+      } catch {
+        // Ignore this fallback and continue.
+      }
+    }
+
+    if (hasStrongRetailerResult(product)) return product;
+    if (zyteError && shouldRejectSparseRetailerProduct(product, targetUrl)) {
+      throw new ExtractError(
+        `Enhanced extraction unavailable for this retailer right now (${zyteError.message}).`,
+        422
+      );
+    }
+    return product;
+  }
 
   const fallbacks = [extractViaZyte, extractViaMicrolink, extractViaJinaAi];
   for (const fallback of fallbacks) {
@@ -4759,6 +6161,118 @@ export async function __testOnlyPickCompactItemName(product, sourceUrl = '') {
   return pickCompactItemName(product, sourceUrl);
 }
 
+export async function __testOnlyPickFinalItemName(product, sourceUrl = '') {
+  return pickFinalItemName(product, sourceUrl);
+}
+
+export function __testOnlyFormatItemName(payload = {}) {
+  return formatItemName(payload);
+}
+
+export function __testOnlyParseJsonLd(html, options = {}) {
+  return parseJsonLd(html, options);
+}
+
+export function __testOnlyCollectImageCandidatesFromHtml(baseUrl, html, meta = {}, jsonLd = {}) {
+  return collectImageCandidatesFromHtml(baseUrl, html, meta, jsonLd);
+}
+
+export async function __testOnlyExtractFromHtml(finalUrl, html) {
+  return extractFromHtml(finalUrl, html);
+}
+
+export function __testOnlyIsLikelyBlockedFallbackContent(text = '') {
+  return isLikelyBlockedFallbackContent(text);
+}
+
+export function __testOnlyShouldRejectSparseRetailerProduct(product = {}, sourceUrl = '') {
+  return shouldRejectSparseRetailerProduct(product, sourceUrl);
+}
+
+export async function __testOnlyRunFullExtraction(url) {
+  const normalizedUrl = normalizeIncomingUrl(url);
+  if (!normalizedUrl) {
+    throw new ExtractError('Invalid URL.', 400);
+  }
+  let product;
+  try {
+    product = await extractProductData(normalizedUrl);
+  } catch {
+    product = minimalFallbackFromUrl(normalizedUrl, []);
+  }
+  product = await enrichProductData(normalizedUrl, product);
+  product = sanitizeProduct(product, normalizedUrl);
+  product.name = await pickFinalItemName(product, normalizedUrl);
+  return product;
+}
+
+export async function __testOnlyDebugExtractionStages(url) {
+  const normalizedUrl = normalizeIncomingUrl(url);
+  if (!normalizedUrl) {
+    throw new ExtractError('Invalid URL.', 400);
+  }
+  let base;
+  try {
+    base = await extractProductData(normalizedUrl);
+  } catch (error) {
+    base = minimalFallbackFromUrl(normalizedUrl, []);
+    base.__initialError = error instanceof Error ? error.message : String(error || '');
+  }
+  const zyte = await (async () => {
+    try {
+      return await extractViaZyte(normalizedUrl);
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : String(error || ''),
+        images: [],
+        image: '',
+        price: '',
+        name: ''
+      };
+    }
+  })();
+  const mergedWithZyte = mergeProducts(base, zyte);
+  const sanitized = sanitizeProduct(mergedWithZyte, normalizedUrl);
+  return {
+    base: {
+      name: base?.name || '',
+      image: base?.image || '',
+      images: Array.isArray(base?.images) ? base.images.length : 0,
+      price: base?.price || '',
+      initialError: base?.__initialError || ''
+    },
+    zyte: {
+      name: zyte?.name || '',
+      image: zyte?.image || '',
+      images: Array.isArray(zyte?.images) ? zyte.images.length : 0,
+      price: zyte?.price || '',
+      error: zyte?.error || ''
+    },
+    merged: {
+      image: mergedWithZyte?.image || '',
+      images: Array.isArray(mergedWithZyte?.images) ? mergedWithZyte.images.length : 0,
+      price: mergedWithZyte?.price || ''
+    },
+    sanitized: {
+      image: sanitized?.image || '',
+      images: Array.isArray(sanitized?.images) ? sanitized.images.length : 0,
+      price: sanitized?.price || ''
+    }
+  };
+}
+
+export function __testOnlyPickBestProductPrice(finalUrl, html) {
+  const primaryHeading = parsePrimaryHeading(html);
+  const pageTitle = parseTitle(html);
+  const meta = parseMetaTags(html);
+  const jsonLd = parseJsonLd(html, {
+    sourceUrl: finalUrl,
+    primaryHeading,
+    pageTitle
+  });
+  return pickBestProductPrice({ finalUrl, html, meta, jsonLd });
+}
+
 export function __testOnlyUpsertDemoTemplateFromSourceBoard(databasePath, options = {}) {
   const db = openDatabase(databasePath);
   try {
@@ -4786,6 +6300,16 @@ export function __testOnlyReadUserSnapshot(databasePath, userId) {
   }
 }
 
+export function __testOnlyAssertTemplateSnapshotWriteAccess(databasePath, user = {}, snapshot = {}) {
+  const db = openDatabase(databasePath);
+  try {
+    assertTemplateSnapshotWriteAccess(db, user, snapshot);
+    return true;
+  } finally {
+    db.close();
+  }
+}
+
 async function handleExtract(req, res) {
   const body = await readJsonBody(req);
   const normalizedUrl = normalizeIncomingUrl(body?.url);
@@ -4807,7 +6331,29 @@ async function handleExtract(req, res) {
 
     product = await enrichProductData(normalizedUrl, product);
     product = sanitizeProduct(product, normalizedUrl);
-    product.name = await pickCompactItemName(product, normalizedUrl);
+    const hasImages = Boolean(product?.image) || (Array.isArray(product?.images) && product.images.length > 0);
+    const productTextForBlockDetection = [
+      product?.name || '',
+      product?.description || '',
+      ...(Array.isArray(product?.specs) ? product.specs : [])
+    ].join(' ');
+    if (
+      isHomeDepotUrl(normalizedUrl) &&
+      !hasImages &&
+      isLikelyBlockedFallbackContent(productTextForBlockDetection)
+    ) {
+      throw new ExtractError(
+        'Home Depot blocked automated extraction from this environment (403), so images could not be retrieved.',
+        422
+      );
+    }
+    if (shouldRejectSparseRetailerProduct(product, normalizedUrl)) {
+      throw new ExtractError(
+        'Retailer blocked automated extraction from this environment, so image and price could not be retrieved.',
+        422
+      );
+    }
+    product.name = await pickFinalItemName(product, normalizedUrl);
     if (needsEnrichment(product) && (!Array.isArray(product.highlights) || !product.highlights.length)) {
       product.highlights = [];
     }
@@ -5062,6 +6608,7 @@ export function createServer({ databasePath = dbPath } = {}) {
           const user = requireAuthenticatedUser();
           if (!user) return;
           const body = await readJsonBody(req, 60_000_000);
+          assertTemplateSnapshotWriteAccess(db, user, body);
           writeUserSnapshot(db, user.id, body);
           respondJson(res, 200, { ok: true });
           return;
