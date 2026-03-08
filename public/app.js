@@ -181,6 +181,7 @@ let betaWelcomeGateEnabled = true;
 let betaAuthMode = BETA_AUTH_MODE_SIGN_IN;
 let appReady = false;
 let hasHydratedData = false;
+let hydratedSessionOwnerKey = '';
 let authRecoveryInProgress = false;
 let pendingPostAuthAction = null;
 let editingItemId = null;
@@ -1639,6 +1640,8 @@ async function handleBetaAuthSubmit() {
     }
     betaWelcomeGateEnabled = parsed?.betaWelcomeGateEnabled !== false;
     activeSessionUser = normalizeSessionUser(parsed?.user);
+    hasHydratedData = false;
+    hydratedSessionOwnerKey = '';
     applySessionIdentity(activeSessionUser);
     if (betaAuthPasswordInput) betaAuthPasswordInput.value = '';
     const acknowledged = await ensureBetaWelcomeAcknowledged();
@@ -1709,8 +1712,17 @@ async function handleHomeAuthButtonClick() {
       throw new Error(`Request failed (${response.status})`);
     }
     activeSessionUser = null;
+    hasHydratedData = false;
+    hydratedSessionOwnerKey = '';
+    activeBoardId = null;
+    activeCategoryPath = [];
+    data = { boards: [] };
+    undoHistory = [];
+    redoHistory = [];
+    lastSavedSnapshot = serializeDataSnapshot(data);
     applySessionIdentity(null);
     closeAuthDialog();
+    await enterAppShell();
     setStatus('Signed out.');
   } catch (error) {
     applySessionIdentity(activeSessionUser);
@@ -1811,8 +1823,10 @@ async function enterAppShell() {
   authRecoveryInProgress = false;
   hideBetaGate();
   if (appShell) appShell.classList.remove('hidden');
-  if (!hasHydratedData) {
+  const sessionOwnerKey = getCurrentSessionOwnerKey() || 'guest';
+  if (!hasHydratedData || hydratedSessionOwnerKey !== sessionOwnerKey) {
     hasHydratedData = true;
+    hydratedSessionOwnerKey = sessionOwnerKey;
     await hydrateDataFromServer();
   }
   if (authRecoveryInProgress) return;
@@ -1849,6 +1863,7 @@ function beginAuthRecovery(message = 'Session expired. Sign in again to continue
   applySessionIdentity(null);
   appReady = false;
   hasHydratedData = false;
+  hydratedSessionOwnerKey = '';
   activeBoardId = null;
   activeCategoryPath = [];
   data = { boards: [] };
