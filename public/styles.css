@@ -1249,6 +1249,7 @@ body.dragging-category .category-card.category-reorder-below {
   border: 1px solid #dac8b4;
   background: #efe4d5;
   flex: 0 0 auto;
+  cursor: pointer;
 }
 
 .category-card-root .category-card-preview-strip .category-card-preview-image {
@@ -1262,6 +1263,45 @@ body.dragging-category .category-card.category-reorder-below {
 
 #board-screen.image-view-mode .category-card-sub .category-card-preview-strip {
   display: none;
+}
+
+.category-preview-hover {
+  position: fixed;
+  z-index: 80;
+  width: min(250px, calc(100vw - 1.25rem));
+  background: #fff;
+  border: 1px solid #d8c6b1;
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(40, 22, 8, 0.24);
+  padding: 0.5rem;
+  pointer-events: none;
+}
+
+.category-preview-hover-image {
+  display: block;
+  width: 100%;
+  max-height: 170px;
+  object-fit: cover;
+  border-radius: 8px;
+  background: #efe4d5;
+}
+
+.category-preview-hover-meta {
+  margin-top: 0.45rem;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.category-preview-hover-seller,
+.category-preview-hover-price {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.3;
+  color: #56432f;
+}
+
+.category-preview-hover-price {
+  font-weight: 650;
 }
 
 .category-card-arrow {
@@ -1493,6 +1533,42 @@ body.dragging-category .category-card.category-reorder-below {
 
 .home-auth-btn:hover {
   background: #e6d8c6;
+}
+
+.home-auth-btn.is-authenticated {
+  padding-right: 1.15rem;
+}
+
+.home-auth-menu {
+  position: fixed;
+  z-index: 2500;
+  min-width: 148px;
+  padding: 0.35rem;
+  border-radius: 12px;
+  border: 1px solid #e1ceb8;
+  background: #fff9f2;
+  box-shadow: 0 14px 30px rgba(96, 69, 43, 0.16);
+}
+
+.home-auth-menu.hidden {
+  display: none;
+}
+
+.home-auth-menu-btn {
+  width: 100%;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: #5b4530;
+  text-align: left;
+  font-size: 0.9rem;
+  font-weight: 650;
+  padding: 0.55rem 0.65rem;
+  cursor: pointer;
+}
+
+.home-auth-menu-btn:hover {
+  background: #f2e4d3;
 }
 
 .list-view-head {

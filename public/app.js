@@ -241,6 +241,16 @@ let activeCategoryMenu = null;
 let activeCategoryMenuToggle = null;
 let activeBoardMenu = null;
 let activeBoardMenuToggle = null;
+const homeAuthMenu = document.createElement('div');
+homeAuthMenu.className = 'home-auth-menu hidden';
+homeAuthMenu.setAttribute('role', 'menu');
+homeAuthMenu.setAttribute('aria-hidden', 'true');
+const homeAuthLogoutBtn = document.createElement('button');
+homeAuthLogoutBtn.type = 'button';
+homeAuthLogoutBtn.className = 'home-auth-menu-btn';
+homeAuthLogoutBtn.setAttribute('role', 'menuitem');
+homeAuthLogoutBtn.textContent = 'Log Out';
+homeAuthMenu.appendChild(homeAuthLogoutBtn);
 const tableBodyDropEndState = new WeakMap();
 const itemGridDropEndState = new WeakMap();
 let undoHistory = [];
@@ -352,6 +362,7 @@ document.addEventListener('focusin', (event) => {
 
 if (document.body) {
   document.body.appendChild(rankMenu);
+  document.body.appendChild(homeAuthMenu);
   document.body.appendChild(categoryPreviewHover);
 }
 
@@ -365,6 +376,7 @@ document.addEventListener('click', () => {
     }
   }
   closeBoardMenu();
+  closeHomeAuthMenu();
 });
 
 betaEnterBtn?.addEventListener('click', () => {
@@ -397,8 +409,17 @@ authDialog?.addEventListener('close', () => {
   if (betaAuthPasswordInput) betaAuthPasswordInput.value = '';
 });
 
-homeAuthBtn?.addEventListener('click', () => {
+homeAuthBtn?.addEventListener('click', (event) => {
+  event.stopPropagation();
   void handleHomeAuthButtonClick();
+});
+homeAuthMenu.addEventListener('click', (event) => {
+  event.stopPropagation();
+});
+homeAuthLogoutBtn.addEventListener('click', (event) => {
+  event.stopPropagation();
+  closeHomeAuthMenu();
+  void performHomeSignOut();
 });
 
 backHomeBtn.addEventListener('click', () => {
@@ -1427,18 +1448,21 @@ window.addEventListener('pointercancel', (event) => {
 window.addEventListener('scroll', () => {
   closeRankMenu();
   closeBoardMenu();
+  closeHomeAuthMenu();
   hideHoverPreview();
 }, { passive: true });
 
 window.addEventListener('blur', () => {
   closeRankMenu();
   closeBoardMenu();
+  closeHomeAuthMenu();
   hideHoverPreview();
 });
 
 window.addEventListener('resize', () => {
   closeRankMenu();
   closeBoardMenu();
+  closeHomeAuthMenu();
 });
 
 editForm.addEventListener('submit', (event) => {
@@ -1669,6 +1693,14 @@ function normalizeSessionUser(user) {
   };
 }
 
+function deriveAuthUsername(user) {
+  if (!user || typeof user !== 'object') return '';
+  const emailLocal = String(user.email || '').split('@')[0]?.trim() || '';
+  if (emailLocal) return emailLocal;
+  const displayName = String(user.displayName || '').trim();
+  return displayName;
+}
+
 function applySessionIdentity(user) {
   const fallbackName = user?.displayName || deriveNameFromEmail(user?.email) || 'ShopBoard User';
   currentUserName = fallbackName;
@@ -1677,12 +1709,24 @@ function applySessionIdentity(user) {
   }
   if (homeAuthBtn) {
     const isAuthenticated = Boolean(user);
-    homeAuthBtn.textContent = isAuthenticated ? 'Log Out' : 'Sign Up / Log In';
+    const username = deriveAuthUsername(user) || fallbackName;
+    homeAuthBtn.textContent = isAuthenticated ? username : 'Sign Up / Log In';
+    homeAuthBtn.classList.toggle('is-authenticated', isAuthenticated);
+    if (isAuthenticated) {
+      homeAuthBtn.setAttribute('aria-haspopup', 'menu');
+      homeAuthBtn.setAttribute('aria-expanded', 'false');
+    } else {
+      homeAuthBtn.removeAttribute('aria-haspopup');
+      homeAuthBtn.removeAttribute('aria-expanded');
+    }
     homeAuthBtn.setAttribute(
       'aria-label',
-      isAuthenticated ? 'Log out of your account' : 'Sign up or log in to your account'
+      isAuthenticated
+        ? `Open account menu for ${username}`
+        : 'Sign up or log in to your account'
     );
   }
+  if (!user) closeHomeAuthMenu();
   if (profileName) {
     profileName.textContent = fallbackName;
   }
@@ -1696,7 +1740,10 @@ async function handleHomeAuthButtonClick() {
     promptAuthForAction('Sign in or create an account to create and save your own boards.');
     return;
   }
+  toggleHomeAuthMenu();
+}
 
+async function performHomeSignOut() {
   if (homeAuthBtn) {
     homeAuthBtn.setAttribute('disabled', 'true');
     homeAuthBtn.textContent = 'Signing Out...';
@@ -1730,7 +1777,52 @@ async function handleHomeAuthButtonClick() {
     console.warn('Could not sign out:', error);
   } finally {
     homeAuthBtn?.removeAttribute('disabled');
+    if (activeSessionUser) {
+      homeAuthBtn.textContent = deriveAuthUsername(activeSessionUser) || currentUserName;
+    }
   }
+}
+
+function closeHomeAuthMenu() {
+  if (!homeAuthMenu || homeAuthMenu.classList.contains('hidden')) return;
+  homeAuthMenu.classList.add('hidden');
+  homeAuthMenu.setAttribute('aria-hidden', 'true');
+  if (homeAuthBtn) homeAuthBtn.setAttribute('aria-expanded', 'false');
+}
+
+function positionHomeAuthMenu(anchorEl) {
+  if (!anchorEl || !homeAuthMenu) return;
+  const anchorRect = anchorEl.getBoundingClientRect();
+  const menuRect = homeAuthMenu.getBoundingClientRect();
+  const gap = 8;
+  let left = anchorRect.right - menuRect.width;
+  let top = anchorRect.bottom + gap;
+  if (left < gap) left = gap;
+  if (left + menuRect.width > window.innerWidth - gap) {
+    left = Math.max(gap, window.innerWidth - menuRect.width - gap);
+  }
+  if (top + menuRect.height > window.innerHeight - gap) {
+    top = Math.max(gap, anchorRect.top - menuRect.height - gap);
+  }
+  homeAuthMenu.style.left = `${Math.round(left)}px`;
+  homeAuthMenu.style.top = `${Math.round(top)}px`;
+}
+
+function toggleHomeAuthMenu() {
+  if (!activeSessionUser || !homeAuthBtn) {
+    closeHomeAuthMenu();
+    return;
+  }
+  if (!homeAuthMenu.classList.contains('hidden')) {
+    closeHomeAuthMenu();
+    return;
+  }
+  closeBoardMenu();
+  closeRankMenu();
+  homeAuthMenu.classList.remove('hidden');
+  homeAuthMenu.setAttribute('aria-hidden', 'false');
+  homeAuthBtn.setAttribute('aria-expanded', 'true');
+  positionHomeAuthMenu(homeAuthBtn);
 }
 
 async function fetchAuthSessionState() {
