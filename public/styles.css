@@ -2371,6 +2371,29 @@ td img {
   transition: box-shadow 140ms ease;
 }
 
+.image-cell-stack {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.35rem;
+}
+
+.image-upload-btn {
+  border: 1px solid #d9b894;
+  border-radius: 8px;
+  background: #fbf2e7;
+  color: #6a4a2b;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.2rem 0.48rem;
+  cursor: pointer;
+}
+
+.image-upload-btn:hover {
+  background: #f8e7d3;
+}
+
 .hover-preview {
   position: fixed;
   left: 50%;

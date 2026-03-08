@@ -1221,7 +1221,14 @@ if (categoryChildren) {
 
 if (addCategorySelect) {
   addCategorySelect.addEventListener('change', () => {
-    addCategoryTargetValue = addCategorySelect.value || '';
+    const nextValue = addCategorySelect.value || '';
+    if (nextValue === '__manual_entry__') {
+      handleManualEntryFromAddDropdown();
+      addCategoryTargetValue = '';
+      addCategorySelect.value = '__placeholder__';
+      return;
+    }
+    addCategoryTargetValue = nextValue;
   });
 }
 
@@ -1365,6 +1372,10 @@ document.addEventListener('keydown', (event) => {
 
 document.addEventListener('mousemove', (event) => {
   if (!hoverPreview || hoverPreview.classList.contains('hidden')) return;
+  if (hoverAddDialog?.open) {
+    cancelHoverPreviewHide();
+    return;
+  }
   const target = event.target;
   if (!(target instanceof Element)) return;
   if (target.closest('#hover-preview') || target.closest('.item-hover-zoom')) {
@@ -1376,6 +1387,7 @@ document.addEventListener('mousemove', (event) => {
 
 document.addEventListener('mousedown', (event) => {
   if (!hoverPreview || hoverPreview.classList.contains('hidden')) return;
+  if (hoverAddDialog?.open) return;
   const target = event.target;
   if (!(target instanceof Element)) {
     hideHoverPreview();
@@ -2347,7 +2359,8 @@ function normalizeItems(items) {
         detailSections: normalizeDetailSections(item?.detailSections || []),
         customFieldValues: normalizeCustomFieldValues(item?.customFieldValues || item?.custom_fields || {}),
         feedbacks: normalizeFeedbacks(item?.feedbacks || []),
-        comments: normalizeComments(item?.comments || [])
+        comments: normalizeComments(item?.comments || []),
+        manualEntry: Boolean(item?.manualEntry)
       };
     })()
   }));
@@ -3008,8 +3021,7 @@ function getCurrentItems(board) {
     if (proxy) return Array.isArray(proxy.items) ? proxy.items : [];
     return Array.isArray(node.items) ? node.items : [];
   }
-  const hasCategories = Array.isArray(board?.categories) && board.categories.length > 0;
-  if (hasCategories) return [];
+  // Root-level uncategorized items must remain visible even when categories exist.
   return Array.isArray(board?.items) ? board.items : [];
 }
 
@@ -5274,12 +5286,43 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
     copyCategoryShareLink(getActiveBoard(), categoryPathIds);
   });
 
+  const manualEntryActionBtn = document.createElement('button');
+  manualEntryActionBtn.type = 'button';
+  manualEntryActionBtn.className = 'category-card-delete-action';
+  const manualEntryIcon = document.createElement('span');
+  manualEntryIcon.className = 'category-card-menu-icon';
+  manualEntryIcon.setAttribute('aria-hidden', 'true');
+  manualEntryIcon.textContent = '✎';
+  const manualEntryText = document.createElement('span');
+  manualEntryText.textContent = 'Manual Entry';
+  manualEntryActionBtn.appendChild(manualEntryIcon);
+  manualEntryActionBtn.appendChild(manualEntryText);
+  manualEntryActionBtn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleMenu(false);
+    const collection = getEditableCollectionForCategoryNode(categoryNode);
+    if (!Array.isArray(collection)) return;
+    const manualItem = buildManualEntryItem();
+    collection.unshift(manualItem);
+    expandedCategoryIds.add(categoryNode.id);
+    lastExpandedCategoryId = categoryNode.id;
+    activeView = 'list';
+    saveView();
+    saveData();
+    renderBoardDetail();
+    setStatus(`Manual entry row added to ${categoryNode.name || 'category'}.`, false);
+    setTimeout(() => {
+      focusItemNameInlineEditor(manualItem.id);
+    }, 0);
+  });
+
   menuToggleBtn.addEventListener('click', (event) => {
     event.stopPropagation();
     toggleMenu(moreMenu.hidden);
   });
 
   moreMenu.appendChild(shareActionBtn);
+  moreMenu.appendChild(manualEntryActionBtn);
   moreMenu.appendChild(deleteActionBtn);
   moreWrapper.appendChild(menuToggleBtn);
   moreWrapper.appendChild(moreMenu);
@@ -5361,10 +5404,10 @@ function renderAddCategoryOptions(board) {
   placeholderOption.selected = true;
   placeholderOption.hidden = true;
   addCategorySelect.appendChild(placeholderOption);
-  const autoOption = document.createElement('option');
-  autoOption.value = '__auto__';
-  autoOption.textContent = 'Auto Categorize';
-  addCategorySelect.appendChild(autoOption);
+  const manualOption = document.createElement('option');
+  manualOption.value = '__manual_entry__';
+  manualOption.textContent = 'Manual Entry';
+  addCategorySelect.appendChild(manualOption);
   for (const target of targets) {
     const opt = document.createElement('option');
     opt.value = encodeCategoryPath(target.pathIds);
@@ -5374,12 +5417,37 @@ function renderAddCategoryOptions(board) {
   }
   if (previousValue && targets.some((target) => encodeCategoryPath(target.pathIds) === previousValue)) {
     addCategorySelect.value = previousValue;
-  } else if (previousValue === '__auto__') {
-    addCategorySelect.value = '__auto__';
+  } else if (previousValue === '__manual_entry__') {
+    addCategorySelect.value = '__manual_entry__';
   } else {
     addCategorySelect.value = '__placeholder__';
     addCategoryTargetValue = '';
   }
+}
+
+function handleManualEntryFromAddDropdown() {
+  const board = getActiveBoard();
+  if (!board) return;
+  const activeNode = getActiveCategoryNode(board);
+  const collection = activeNode
+    ? getEditableCollectionForCategoryNode(activeNode)
+    : (Array.isArray(board.items) ? board.items : (board.items = []));
+  if (!Array.isArray(collection)) return;
+
+  const manualItem = buildManualEntryItem();
+  collection.unshift(manualItem);
+  if (activeNode?.id) {
+    expandedCategoryIds.add(activeNode.id);
+    lastExpandedCategoryId = activeNode.id;
+  }
+  activeView = 'list';
+  saveView();
+  saveData();
+  renderBoardDetail();
+  setStatus(`Manual entry row added to ${activeNode?.name || 'board'}.`, false);
+  setTimeout(() => {
+    focusItemNameInlineEditor(manualItem.id);
+  }, 0);
 }
 
 function buildCategoryItemsTable(items, itemCollection, categoryNode = null) {
@@ -5751,9 +5819,28 @@ function buildItemCellForCategory(row, item, category, board) {
     cell.className = 'image-cell';
     const itemImages = getItemImages(item);
     const displayImage = itemImages[0] || item.image || '';
-    cell.innerHTML = displayImage
-      ? `<img class="item-hover-zoom" src="${escapeHtml(displayImage)}" alt="${escapeHtml(item.name)}" loading="lazy" />`
-      : '<span>No image</span>';
+    const stack = document.createElement('div');
+    stack.className = 'image-cell-stack';
+    if (displayImage) {
+      const image = document.createElement('img');
+      image.className = 'item-hover-zoom';
+      image.src = displayImage;
+      image.alt = item.name || 'Item image';
+      image.loading = 'lazy';
+      stack.appendChild(image);
+    }
+    if (item?.manualEntry && !displayImage) {
+      const uploadBtn = document.createElement('button');
+      uploadBtn.type = 'button';
+      uploadBtn.className = 'image-upload-btn';
+      uploadBtn.textContent = 'Upload image';
+      uploadBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        openAddImageDialogForItem(item.id);
+      });
+      stack.appendChild(uploadBtn);
+    }
+    cell.appendChild(stack);
     const imageEditTarget = cell.querySelector('img');
     if (imageEditTarget) {
       bindImageFallbackToItem(imageEditTarget, item, itemImages);
@@ -5904,6 +5991,18 @@ function buildCustomFieldCell(board, item, category) {
   return cell;
 }
 
+function focusItemNameInlineEditor(itemId) {
+  if (!itemId) return;
+  const scope = boardScreen || document;
+  const row = scope.querySelector(`tr[data-item-id="${escapeCssSelector(itemId)}"]`);
+  if (!(row instanceof HTMLElement)) return;
+  const preferredToken = row.querySelector('.name-cell .editable-token');
+  const fallbackToken = row.querySelector('.editable-token');
+  const token = preferredToken || fallbackToken;
+  if (!(token instanceof HTMLElement)) return;
+  token.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+}
+
 function startCustomFieldEdit({ board, item, category, container }) {
   if (!container || container.dataset.editing === 'true') return;
   if (category.type === 'boolean' || category.type === 'select') {
@@ -6028,17 +6127,10 @@ function cancelHoverPreviewHide() {
 
 function hideHoverPreview() {
   if (!hoverPreview || !hoverPreviewImage) return;
-  const shouldCloseAddDialog = Boolean(
-    hoverAddDialog?.open
-    && activeAddImageItemId != null
-    && hoverPreviewItemId != null
-    && activeAddImageItemId === hoverPreviewItemId
-  );
   hoverPreview.classList.add('hidden');
   hoverPreview.setAttribute('aria-hidden', 'true');
   hoverPreviewImage.removeAttribute('src');
   if (hoverPreviewThumbs) hoverPreviewThumbs.innerHTML = '';
-  if (shouldCloseAddDialog) hoverAddDialog.close();
   hoverPreviewItemId = null;
   hoverPreviewImages = [];
   hoverPreviewIndex = 0;
@@ -6207,6 +6299,7 @@ function addImageUrlFromHoverPreview(overrideUrl = '') {
   if (!didAdd) return;
   if (hoverAddUrl) hoverAddUrl.value = '';
   if (hoverAddDialog?.open) hoverAddDialog.close();
+  showHoverPreview(item.id);
 }
 
 function addUploadedImageFromHoverPreview(fileOverride = null) {
@@ -6221,9 +6314,40 @@ function addUploadedImageFromHoverPreview(fileOverride = null) {
     const optimizedDataUrl = await optimizeUploadedImageDataUrl(dataUrl);
     const didAdd = addImageToItem(item, optimizedDataUrl || dataUrl);
     if (!didAdd) return;
+    if (hoverAddUploadInput) hoverAddUploadInput.value = '';
     if (hoverAddDialog?.open) hoverAddDialog.close();
+    showHoverPreview(item.id);
   };
   reader.readAsDataURL(file);
+}
+
+function addUploadedImageFileToItem(item, file) {
+  if (!item) return;
+  if (!file || !/^image\//i.test(String(file.type || ''))) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const dataUrl = String(reader.result || '').trim();
+    if (!dataUrl) return;
+    const optimizedDataUrl = await optimizeUploadedImageDataUrl(dataUrl);
+    addImageToItem(item, optimizedDataUrl || dataUrl);
+  };
+  reader.readAsDataURL(file);
+}
+
+function promptImageUploadForItem(itemId) {
+  const board = getActiveBoard();
+  if (!board || !itemId) return;
+  const item = findItemInBoard(board, itemId);
+  if (!item) return;
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = 'image/*';
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files?.[0] || null;
+    if (!file) return;
+    addUploadedImageFileToItem(item, file);
+  });
+  fileInput.click();
 }
 
 async function optimizeUploadedImageDataUrl(dataUrl) {
@@ -8825,5 +8949,30 @@ function buildFallbackItem(rawUrl) {
     customFieldValues: {},
     feedbacks: [],
     comments: []
+  };
+}
+
+function buildManualEntryItem() {
+  return {
+    id: crypto.randomUUID(),
+    url: '',
+    brand: '',
+    name: 'Untitled item',
+    image: '',
+    images: [],
+    seller: '',
+    price: '',
+    highlights: [],
+    description: '',
+    dimensions: [],
+    materials: [],
+    specs: [],
+    overview: '',
+    overviewBullets: [],
+    detailSections: [],
+    customFieldValues: {},
+    feedbacks: [],
+    comments: [],
+    manualEntry: true
   };
 }

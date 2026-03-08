@@ -2111,10 +2111,29 @@ function parseTitle(html) {
   return decodeHtmlEntities(stripTags(titleMatch[1]));
 }
 
-function parsePrimaryHeading(html) {
-  const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-  if (!h1Match) return '';
-  return decodeHtmlEntities(stripTags(h1Match[1]));
+function extractAmazonProductTitleFromHtml(html) {
+  const doc = String(html || '');
+  if (!doc) return '';
+  const productTitleSpan = doc.match(/<span[^>]*id=(["'])productTitle\1[^>]*>([\s\S]*?)<\/span>/i);
+  if (productTitleSpan?.[2]) return decodeHtmlEntities(stripTags(productTitleSpan[2]));
+  const h1WithProductId = doc.match(/<h1[^>]*(?:id|data-automation-id)=(["'])(?:title|product-title)\1[^>]*>([\s\S]*?)<\/h1>/i);
+  if (h1WithProductId?.[2]) return decodeHtmlEntities(stripTags(h1WithProductId[2]));
+  return '';
+}
+
+function parsePrimaryHeading(html, { sourceUrl = '' } = {}) {
+  if (isAmazonUrl(sourceUrl)) {
+    const amazonTitle = extractAmazonProductTitleFromHtml(html);
+    if (amazonTitle) return amazonTitle;
+  }
+  const h1Matches = [...String(html || '').matchAll(/<h1[^>]*>([\s\S]*?)<\/h1>/gi)];
+  if (!h1Matches.length) return '';
+  const candidates = h1Matches
+    .map((match) => decodeHtmlEntities(stripTags(match[1] || '')))
+    .map((value) => String(value || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  if (!candidates.length) return '';
+  return chooseBestNameCandidate(candidates, sourceUrl) || candidates[0] || '';
 }
 
 function resolveJsonLdImageCandidate(candidate) {
@@ -2215,7 +2234,7 @@ function scoreJsonLdProductCandidate(candidate, { sourceUrl = '', primaryHeading
 
   if (!name) score -= 160;
   if (isRetailerOnlyName(name)) score -= 120;
-  if (isWeakName(name)) score -= 70;
+  if (isWeakName(name, sourceUrl)) score -= 70;
 
   const words = name.split(/\s+/).filter(Boolean);
   if (words.length >= 2 && words.length <= 16) score += 20;
@@ -3288,25 +3307,46 @@ function hasStrongRetailerResult(product = {}) {
   return hasPrice && (imageCount >= 2 || hasPrimaryImage);
 }
 
+function isLikelyAsinToken(value = '') {
+  return /^[a-z0-9]{10}$/i.test(String(value || '').trim());
+}
+
+function slugToTitle(slug = '') {
+  return decodeURIComponent(String(slug || ''))
+    .replace(/\.\w+$/i, '')
+    .replace(/[-_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .trim();
+}
+
 function titleFromUrl(rawUrl) {
   try {
     const url = new URL(rawUrl);
     const parts = url.pathname.split('/').filter(Boolean);
     const ignored = new Set(['product', 'products', 'shop', 'item', 'p', 'pd', 'collections', 'collection']);
+    if (isAmazonUrl(rawUrl)) {
+      const lowerParts = parts.map((part) => String(part || '').toLowerCase());
+      const dpIndex = lowerParts.findIndex((part) => part === 'dp');
+      if (dpIndex > 0) {
+        const slug = String(parts[dpIndex - 1] || '').trim();
+        if (slug && /[a-z]/i.test(slug) && !isLikelyAsinToken(slug)) {
+          return slugToTitle(slug);
+        }
+      }
+    }
     const preferredPart = [...parts].reverse().find((part) => {
       const clean = String(part || '').toLowerCase().replace(/\.\w+$/i, '');
       if (!clean || ignored.has(clean)) return false;
       if (/^\d+(\.\w+)?$/.test(clean)) return false;
       if (!/[a-z]/i.test(clean)) return false;
+      if (/^ref=/.test(clean)) return false;
+      if (isLikelyAsinToken(clean)) return false;
+      if (/^[a-z]{0,3}\d{6,}[a-z0-9-]*$/i.test(clean)) return false;
       return true;
     });
     const slug = preferredPart || parts[parts.length - 1] || url.hostname;
-    return decodeURIComponent(slug)
-      .replace(/\.\w+$/i, '')
-      .replace(/[-_]+/g, ' ')
-      .replace(/\s+/g, ' ')
-      .replace(/\b\w/g, (c) => c.toUpperCase())
-      .trim();
+    return slugToTitle(slug);
   } catch {
     return 'Untitled item';
   }
@@ -3340,13 +3380,47 @@ function minimalFallbackFromUrl(rawUrl, highlights = []) {
   };
 }
 
-function isWeakName(name) {
+function countTitleNoiseSignals(value = '') {
+  const text = String(value || '').toLowerCase();
+  const patterns = [
+    /\bref\s*=/,
+    /\brelease date\b/,
+    /\bcustomer reviews?\b/,
+    /\banswered questions?\b/,
+    /\bsort by\b/,
+    /\bsearch results?\b/,
+    /\badd to cart\b/,
+    /\bshop now\b/
+  ];
+  return patterns.reduce((count, pattern) => count + (pattern.test(text) ? 1 : 0), 0);
+}
+
+function isLikelyNonsenseTitle(name, sourceUrl = '') {
+  const value = String(name || '').replace(/\s+/g, ' ').trim();
+  if (!value) return true;
+  if (/\bref\s*=/.test(value.toLowerCase())) return true;
+  if (/\bby\s+no\b/i.test(value)) return true;
+
+  const words = value.split(/\s+/).filter(Boolean);
+  const alphaChars = (value.match(/[a-z]/gi) || []).length;
+  const symbolChars = (value.match(/[^a-z0-9\s]/gi) || []).length;
+  const noiseSignals = countTitleNoiseSignals(value);
+
+  if (noiseSignals >= 2) return true;
+  if (isAmazonUrl(sourceUrl) && noiseSignals >= 1) return true;
+  if (words.length >= 4 && alphaChars < 8) return true;
+  if (value.length >= 12 && symbolChars >= Math.ceil(value.length * 0.18)) return true;
+  return false;
+}
+
+function isWeakName(name, sourceUrl = '') {
   const value = String(name || '').trim();
   if (!value) return true;
   if (/^untitled item$/i.test(value)) return true;
   if (/^\d+(\.\w+)?$/i.test(value)) return true;
   if (/^(access denied|forbidden|request blocked|bot detection|are you human\??)$/i.test(value)) return true;
   if (/(access denied|temporarily unavailable|verify you are human|captcha)/i.test(value)) return true;
+  if (isLikelyNonsenseTitle(value, sourceUrl)) return true;
   if (isRetailerOnlyName(value)) return true;
   return false;
 }
@@ -3855,11 +3929,11 @@ function generateUniversalItemName(product, sourceUrl = '') {
     sellerName: product?.seller || '',
     brandConfidence: context.brandConfidence
   });
-  if (formatted && !isWeakName(formatted)) {
+  if (formatted && !isWeakName(formatted, sourceUrl)) {
     return truncateItemName(formatted);
   }
   const fallback = buildFallbackTitleName(context.productTitle || product?.name || titleFromUrl(sourceUrl));
-  if (fallback && !isWeakName(fallback)) return truncateItemName(fallback);
+  if (fallback && !isWeakName(fallback, sourceUrl)) return truncateItemName(fallback);
   const fullName = buildItemName(context.productTitle || product?.name || titleFromUrl(sourceUrl), sourceUrl);
   if (shouldPreferFullItemName(fullName, sourceUrl)) return fullName;
   return truncateItemName(fullName || titleFromUrl(sourceUrl) || 'Untitled item');
@@ -3873,6 +3947,12 @@ function formatItemName({ productTitle = '', brand = '', sellerName = '', brandC
   const titleWithoutBrand = removeBrandFromTitle(cleanTitle, cleanBrand);
   const compactTitle = compactTitleForBrandDisplay(titleWithoutBrand || cleanTitle);
   if (!cleanBrand) {
+    const words = cleanTitle.split(/\s+/).filter(Boolean);
+    const hasSpecNoise = /\b\d+(?:\.\d+)?\s*(?:in(?:ch(?:es)?)?|ft|cm|mm|w|watt|watts|v|volt|volts|gpf|gpm|lb|lbs|kg)\b/i.test(cleanTitle)
+      || /\b(?:model|sku|item|style|part|no\.?)\b/i.test(cleanTitle);
+    if (words.length <= 8 && !hasSpecNoise) {
+      return truncateItemName(cleanTitle);
+    }
     return truncateItemName(buildFallbackTitleName(titleWithoutBrand || cleanTitle) || titleWithoutBrand || cleanTitle);
   }
   if (!shouldAppendBrand({
@@ -3931,29 +4011,81 @@ function extractVisibleBrandCandidates(html = '') {
   return out;
 }
 
+function normalizeProductTitleCandidate(rawTitle = '', sourceUrl = '') {
+  const clean = normalizeTitle(rawTitle);
+  if (!clean) return '';
+  if (!isAmazonUrl(sourceUrl)) return clean;
+  const segments = clean.split(/\s[-–—|]\s/).map((entry) => entry.trim()).filter(Boolean);
+  if (!segments.length) return clean;
+  const primary = segments[0];
+  if (!primary) return clean;
+  const words = primary.split(/\s+/).filter(Boolean);
+  if (words.length >= 3 && words.length <= 14 && !isWeakName(primary, sourceUrl)) {
+    return primary;
+  }
+  return clean;
+}
+
+function scoreProductTitleCandidate(candidate, { sourceUrl = '' } = {}) {
+  const normalized = normalizeProductTitleCandidate(candidate?.raw || '', sourceUrl);
+  if (!normalized) return Number.NEGATIVE_INFINITY;
+  if (isWeakName(normalized, sourceUrl) || isRetailerOnlyName(normalized)) return Number.NEGATIVE_INFINITY;
+
+  let score = Number(candidate?.confidence || 0) * 100;
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length >= 2 && words.length <= 18) score += 18;
+  if (words.length === 1) score -= 18;
+  if (words.length > 24) score -= 20;
+  if (isGenericTypeOnlyName(normalized)) score -= 26;
+  if (/\b(product|toy|climber|chair|table|faucet|lamp|light|mount|toilet|bed|rug)\b/i.test(normalized)) score += 10;
+  if (isLikelyNonsenseTitle(normalized, sourceUrl)) score -= 180;
+
+  if (isAmazonUrl(sourceUrl)) {
+    if (candidate?.source === 'amazon_dom') score += 34;
+    if (candidate?.source === 'h1') score += 10;
+    if (candidate?.source === 'url') score -= 12;
+  }
+
+  return score;
+}
+
 function extractProductTitle(doc, structuredData, metadata, { sourceUrl = '' } = {}) {
+  const primaryHeading = parsePrimaryHeading(doc, { sourceUrl });
+  const amazonDomTitle = isAmazonUrl(sourceUrl) ? extractAmazonProductTitleFromHtml(doc) : '';
   const candidates = [
-    { raw: parsePrimaryHeading(doc), source: 'h1', confidence: 0.98 },
+    { raw: amazonDomTitle, source: 'amazon_dom', confidence: 0.995 },
+    { raw: primaryHeading, source: 'h1', confidence: 0.98 },
     { raw: structuredData?.name || '', source: 'json_ld', confidence: 0.92 },
+    { raw: metadata?.title || '', source: 'metadata', confidence: 0.7 },
     { raw: metadata?.['og:title'] || '', source: 'metadata', confidence: 0.68 },
     { raw: metadata?.['twitter:title'] || '', source: 'metadata', confidence: 0.66 },
     { raw: parseTitle(doc), source: 'metadata', confidence: 0.6 },
     { raw: titleFromUrl(sourceUrl), source: 'url', confidence: 0.45 }
   ];
 
+  let best = null;
+  let bestScore = Number.NEGATIVE_INFINITY;
   for (const candidate of candidates) {
-    const normalized = normalizeTitle(candidate.raw);
-    if (!normalized || isWeakName(normalized) || isRetailerOnlyName(normalized)) continue;
-    return {
-      productTitleRaw: normalized,
-      productTitle: normalized,
-      source: candidate.source,
-      confidence: candidate.confidence
-    };
+    const normalized = normalizeProductTitleCandidate(candidate.raw, sourceUrl);
+    if (!normalized) continue;
+    const score = scoreProductTitleCandidate(candidate, { sourceUrl });
+    if (!best || score > bestScore) {
+      best = {
+        productTitleRaw: normalized,
+        productTitle: normalized,
+        source: candidate.source,
+        confidence: candidate.confidence
+      };
+      bestScore = score;
+    }
+  }
+
+  if (best && Number.isFinite(bestScore) && bestScore > Number.NEGATIVE_INFINITY) {
+    return best;
   }
 
   const fallbackRaw = chooseBestNameCandidate(candidates.map((entry) => entry.raw), sourceUrl) || titleFromUrl(sourceUrl) || 'Untitled item';
-  const fallbackNormalized = normalizeTitle(fallbackRaw) || buildItemName(fallbackRaw, sourceUrl);
+  const fallbackNormalized = normalizeProductTitleCandidate(fallbackRaw, sourceUrl) || buildItemName(fallbackRaw, sourceUrl);
   return {
     productTitleRaw: fallbackNormalized,
     productTitle: fallbackNormalized,
@@ -4049,9 +4181,9 @@ function resolvePreferredProductTitle(product, sourceUrl = '') {
   ];
   const winner = chooseBestNameCandidate(candidates, sourceUrl) || candidates.find((entry) => String(entry || '').trim()) || '';
   let normalized = normalizeTitle(winner);
-  if (!normalized || isWeakName(normalized) || isRetailerOnlyName(normalized) || isGenericTypeOnlyName(normalized)) {
+  if (!normalized || isWeakName(normalized, sourceUrl) || isRetailerOnlyName(normalized) || isGenericTypeOnlyName(normalized)) {
     const fromUrl = normalizeTitle(titleFromUrl(sourceUrl));
-    if (fromUrl && !isWeakName(fromUrl) && !isRetailerOnlyName(fromUrl)) {
+    if (fromUrl && !isWeakName(fromUrl, sourceUrl) && !isRetailerOnlyName(fromUrl)) {
       normalized = fromUrl;
     }
   }
@@ -4542,9 +4674,9 @@ function buildItemName(rawName, sourceUrl = '') {
   const base = String(rawName || '').replace(/\s+/g, ' ').trim();
   const cleaned = cleanExtractedItemName(base);
   const bestCandidate = chooseBestNameCandidate([cleaned, base], sourceUrl) || cleaned;
-  const safe = isWeakName(bestCandidate) ? titleFromUrl(sourceUrl) : bestCandidate;
+  const safe = isWeakName(bestCandidate, sourceUrl) ? titleFromUrl(sourceUrl) : bestCandidate;
   const normalized = cleanExtractedItemName(safe);
-  if (normalized && !isWeakName(normalized)) return truncateItemName(normalized);
+  if (normalized && !isWeakName(normalized, sourceUrl)) return truncateItemName(normalized);
   const fromUrl = cleanExtractedItemName(titleFromUrl(sourceUrl));
   return truncateItemName(fromUrl || 'Untitled item');
 }
@@ -5423,7 +5555,7 @@ async function fetchPage(targetUrl) {
 
 async function extractFromHtml(finalUrl, html) {
   const meta = parseMetaTags(html);
-  const primaryHeading = parsePrimaryHeading(html);
+  const primaryHeading = parsePrimaryHeading(html, { sourceUrl: finalUrl });
   const pageTitle = parseTitle(html);
   const jsonLd = parseJsonLd(html, {
     sourceUrl: finalUrl,
@@ -5594,7 +5726,7 @@ async function extractViaZyte(targetUrl) {
   const base = minimalFallbackFromUrl(finalUrl);
   const browserHtml = typeof payload?.browserHtml === 'string' ? payload.browserHtml : '';
   const browserMeta = browserHtml ? parseMetaTags(browserHtml) : {};
-  const browserPrimaryHeading = browserHtml ? parsePrimaryHeading(browserHtml) : '';
+  const browserPrimaryHeading = browserHtml ? parsePrimaryHeading(browserHtml, { sourceUrl: finalUrl }) : '';
   const browserPageTitle = browserHtml ? parseTitle(browserHtml) : '';
   const browserJsonLd = browserHtml
     ? parseJsonLd(browserHtml, {
@@ -5830,7 +5962,10 @@ async function serveStatic(req, res) {
     const data = await fs.readFile(filePath);
     const ext = path.extname(filePath);
     const type = MIME_TYPES[ext] || 'application/octet-stream';
-    res.writeHead(200, { 'Content-Type': type });
+    res.writeHead(200, {
+      'Content-Type': type,
+      'Cache-Control': 'no-store'
+    });
     res.end(data);
   } catch {
     res.writeHead(404);
@@ -6262,7 +6397,7 @@ export async function __testOnlyDebugExtractionStages(url) {
 }
 
 export function __testOnlyPickBestProductPrice(finalUrl, html) {
-  const primaryHeading = parsePrimaryHeading(html);
+  const primaryHeading = parsePrimaryHeading(html, { sourceUrl: finalUrl });
   const pageTitle = parseTitle(html);
   const meta = parseMetaTags(html);
   const jsonLd = parseJsonLd(html, {
