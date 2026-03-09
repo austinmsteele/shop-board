@@ -996,6 +996,49 @@ function findBoardInSnapshot(snapshot, boardId) {
   return boards.find((entry) => String(entry?.id || '').trim() === normalizedBoardId) || null;
 }
 
+function findBoardInAnyUserSnapshot(db, boardId, ownerUserId = '') {
+  const normalizedBoardId = String(boardId || '').trim();
+  if (!normalizedBoardId) return null;
+  const normalizedOwnerId = String(ownerUserId || '').trim();
+  if (!tableExists(db, 'user_snapshots')) return null;
+
+  if (normalizedOwnerId) {
+    const ownerSnapshot = readUserSnapshot(db, normalizedOwnerId);
+    return findBoardInSnapshot(ownerSnapshot, normalizedBoardId);
+  }
+
+  const rows = db.prepare(`
+    SELECT snapshot_json
+    FROM user_snapshots
+    ORDER BY updated_at DESC
+  `).all();
+  for (const row of rows) {
+    const snapshot = normalizeAppDataSnapshot(safeJsonParse(row?.snapshot_json || '{}', {}));
+    const board = findBoardInSnapshot(snapshot, normalizedBoardId);
+    if (board) return board;
+  }
+  return null;
+}
+
+async function resolveSharedBoardById(db, boardId, ownerUserId = '') {
+  const normalizedBoardId = String(boardId || '').trim();
+  if (!normalizedBoardId) return null;
+  const normalizedOwnerId = String(ownerUserId || '').trim();
+
+  if (normalizedOwnerId) {
+    const ownerBoard = findBoardInAnyUserSnapshot(db, normalizedBoardId, normalizedOwnerId);
+    if (ownerBoard) return cloneJson(ownerBoard, ownerBoard);
+  }
+
+  const anyUserBoard = findBoardInAnyUserSnapshot(db, normalizedBoardId);
+  if (anyUserBoard) return cloneJson(anyUserBoard, anyUserBoard);
+
+  const anonymousSnapshot = await resolveAnonymousSnapshot(db);
+  const anonymousBoard = findBoardInSnapshot(anonymousSnapshot, normalizedBoardId);
+  if (anonymousBoard) return cloneJson(anonymousBoard, anonymousBoard);
+  return null;
+}
+
 function listBoardItems(board) {
   const items = [];
   const seenIds = new Set();
@@ -6707,6 +6750,22 @@ export function createServer({ databasePath = dbPath } = {}) {
       if (method === 'POST' && pathname === '/api/extract') {
         if (!requireAuthenticatedUser()) return;
         await handleExtract(req, res);
+        return;
+      }
+
+      if (pathname === '/api/shared-board' && method === 'GET') {
+        const boardId = String(parsedUrl.searchParams.get('board') || '').trim();
+        const ownerUserId = String(parsedUrl.searchParams.get('owner') || '').trim();
+        if (!boardId) {
+          respondJson(res, 400, { error: 'Board id is required.' });
+          return;
+        }
+        const sharedBoard = await resolveSharedBoardById(db, boardId, ownerUserId);
+        if (!sharedBoard) {
+          respondJson(res, 404, { error: 'Shared board not found.' });
+          return;
+        }
+        respondJson(res, 200, { board: sharedBoard });
         return;
       }
 

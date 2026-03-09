@@ -19,6 +19,7 @@ const boardScreen = document.querySelector('#board-screen');
 const boardAuthBar = document.querySelector('#board-auth-bar');
 const boardAuthBtn = document.querySelector('#board-auth-btn');
 const boardTitle = document.querySelector('#board-title');
+const boardShareBtn = document.querySelector('#board-share-btn');
 const profileAvatar = document.querySelector('.profile-avatar');
 const profileName = document.querySelector('.profile-name');
 
@@ -216,6 +217,7 @@ let activeImageRootCategoryId = '';
 let sharedCategoryScopeBoardId = '';
 let sharedCategoryScopePath = [];
 let sharedCategoryScopeAccess = SHARE_ACCESS_EDIT;
+let sharedCategoryScopeOwnerId = '';
 let createDialogMode = 'board';
 let boardEditTargetId = null;
 let boardEditPreviewDraft = ['', '', ''];
@@ -466,6 +468,14 @@ boardTitle.addEventListener('keydown', (event) => {
     event.preventDefault();
     startBoardTitleEdit();
   }
+});
+
+boardShareBtn?.addEventListener('click', (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  const board = getActiveBoard();
+  if (!board) return;
+  void copyBoardShareLink(board);
 });
 
 boardTitleInput.addEventListener('keydown', (event) => {
@@ -2095,6 +2105,7 @@ async function enterAppShell() {
   if (!appReady) {
     appReady = true;
   }
+  await ensureInitialShareBoardLoaded();
   applyInitialShareLinkState();
   renderApp();
 }
@@ -2281,6 +2292,7 @@ async function hydrateDataFromServer() {
       lastSavedSnapshot = serializeDataSnapshot(data);
       undoHistory = [];
       redoHistory = [];
+      await ensureInitialShareBoardLoaded();
       applyInitialShareLinkState();
       renderApp();
       if (shouldClearLocalSnapshot) clearLegacyLocalDataKeys();
@@ -3969,22 +3981,61 @@ function getAllBoardItems(board) {
   return [...categoryItems, ...rootItems];
 }
 
+async function fetchSharedBoardForShareIntent(boardId, ownerId = '') {
+  const normalizedBoardId = String(boardId || '').trim();
+  if (!normalizedBoardId) return null;
+  try {
+    const params = new URLSearchParams();
+    params.set('board', normalizedBoardId);
+    const normalizedOwnerId = String(ownerId || '').trim();
+    if (normalizedOwnerId) params.set('owner', normalizedOwnerId);
+    const response = await fetch(`/api/shared-board?${params.toString()}`);
+    if (!response.ok) return null;
+    const payload = await response.json();
+    const board = normalizeBoard(payload?.board || {});
+    if (String(board?.id || '').trim() !== normalizedBoardId) return null;
+    return board;
+  } catch {
+    return null;
+  }
+}
+
+async function ensureInitialShareBoardLoaded() {
+  const boardId = String(initialShareIntent?.boardId || '').trim();
+  if (!boardId) return false;
+  const ownerId = String(initialShareIntent?.ownerId || '').trim();
+  const currentUserId = String(activeSessionUser?.id || '').trim();
+  const shouldPreferOwnerBoard = Boolean(ownerId && ownerId !== currentUserId);
+  const boards = Array.isArray(data?.boards) ? data.boards : [];
+  const hasBoard = boards.some((entry) => String(entry?.id || '').trim() === boardId);
+  if (hasBoard && !shouldPreferOwnerBoard) return false;
+
+  const sharedBoard = await fetchSharedBoardForShareIntent(boardId, ownerId);
+  if (!sharedBoard) return false;
+  const remainingBoards = boards.filter((entry) => String(entry?.id || '').trim() !== boardId);
+  data.boards = [sharedBoard, ...remainingBoards];
+  return true;
+}
+
 function readInitialShareIntent() {
   try {
     const url = new URL(window.location.href);
     const boardId = String(url.searchParams.get('board') || '').trim();
     const categoryParam = String(url.searchParams.get('category') || '').trim();
     const accessParam = String(url.searchParams.get('access') || '').trim().toLowerCase();
+    const ownerId = String(url.searchParams.get('owner') || '').trim();
     return {
       boardId,
       categoryParam,
-      accessParam
+      accessParam,
+      ownerId
     };
   } catch {
     return {
       boardId: '',
       categoryParam: '',
-      accessParam: ''
+      accessParam: '',
+      ownerId: ''
     };
   }
 }
@@ -3993,9 +4044,10 @@ function clearSharedCategoryScope() {
   sharedCategoryScopeBoardId = '';
   sharedCategoryScopePath = [];
   sharedCategoryScopeAccess = SHARE_ACCESS_EDIT;
+  sharedCategoryScopeOwnerId = '';
 }
 
-function setSharedCategoryScope(boardId, requestedPath = [], accessLevel = SHARE_ACCESS_EDIT) {
+function setSharedCategoryScope(boardId, requestedPath = [], accessLevel = SHARE_ACCESS_EDIT, ownerId = '') {
   const path = Array.isArray(requestedPath) ? requestedPath.filter(Boolean) : [];
   if (!boardId) {
     clearSharedCategoryScope();
@@ -4004,6 +4056,7 @@ function setSharedCategoryScope(boardId, requestedPath = [], accessLevel = SHARE
   sharedCategoryScopeBoardId = String(boardId);
   sharedCategoryScopePath = [...path];
   sharedCategoryScopeAccess = normalizeShareAccessLevel(accessLevel, SHARE_ACCESS_EDIT);
+  sharedCategoryScopeOwnerId = String(ownerId || '').trim();
 }
 
 function getActiveSharedCategoryScope(board) {
@@ -4016,7 +4069,8 @@ function getActiveSharedCategoryScope(board) {
   return {
     requestedPath: [...sharedCategoryScopePath],
     title,
-    access: normalizeShareAccessLevel(sharedCategoryScopeAccess, SHARE_ACCESS_EDIT)
+    access: normalizeShareAccessLevel(sharedCategoryScopeAccess, SHARE_ACCESS_EDIT),
+    ownerId: String(sharedCategoryScopeOwnerId || '').trim()
   };
 }
 
@@ -4024,13 +4078,14 @@ function applyInitialShareLinkState() {
   const boardId = String(initialShareIntent?.boardId || '').trim();
   const categoryParam = String(initialShareIntent?.categoryParam || '').trim();
   const accessParam = String(initialShareIntent?.accessParam || '').trim();
+  const ownerId = String(initialShareIntent?.ownerId || '').trim();
   if (!boardId) return false;
   clearSharedCategoryScope();
   const board = data.boards.find((entry) => entry.id === boardId);
   if (!board) return false;
   activeBoardId = board.id;
   if (!categoryParam) {
-    setSharedCategoryScope(board.id, [], accessParam);
+    setSharedCategoryScope(board.id, [], accessParam, ownerId);
     activeCategoryPath = [];
     initialShareIntent = null;
     return true;
@@ -4038,7 +4093,7 @@ function applyInitialShareLinkState() {
   const requestedPath = decodeCategoryPath(categoryParam);
   const sharedNode = requestedPath.length ? getCategoryNodeByPath(board, requestedPath) : null;
   if (sharedNode) {
-    setSharedCategoryScope(board.id, requestedPath, accessParam);
+    setSharedCategoryScope(board.id, requestedPath, accessParam, ownerId);
     activeCategoryPath = [];
     activeImageRootCategoryId = '';
     expandedCategoryIds.clear();
@@ -4048,7 +4103,7 @@ function applyInitialShareLinkState() {
     }
     lastExpandedCategoryId = requestedPath[requestedPath.length - 1] || '';
   } else {
-    setSharedCategoryScope(board.id, [], accessParam);
+    setSharedCategoryScope(board.id, [], accessParam, ownerId);
     activeCategoryPath = [];
   }
   initialShareIntent = null;
@@ -4509,8 +4564,18 @@ function buildCategoryShareLink(boardId, categoryPathIds = [], accessLevel = SHA
   return buildShareLink(boardId, categoryPathIds, accessLevel);
 }
 
+function getShareLinkOwnerId(boardId = '') {
+  const normalizedBoardId = String(boardId || '').trim();
+  if (!normalizedBoardId) return '';
+  if (String(sharedCategoryScopeBoardId || '') === normalizedBoardId) {
+    return String(sharedCategoryScopeOwnerId || '').trim();
+  }
+  return String(activeSessionUser?.id || '').trim();
+}
+
 function buildShareLink(boardId, categoryPathIds = [], accessLevel = '') {
   if (!boardId) return '';
+  const ownerId = getShareLinkOwnerId(boardId);
   try {
     const url = new URL(window.location.href);
     url.searchParams.set('board', boardId);
@@ -4521,6 +4586,11 @@ function buildShareLink(boardId, categoryPathIds = [], accessLevel = '') {
     } else {
       url.searchParams.delete('category');
     }
+    if (ownerId) {
+      url.searchParams.set('owner', ownerId);
+    } else {
+      url.searchParams.delete('owner');
+    }
     url.searchParams.set('access', normalizedAccess);
     return url.toString();
   } catch {
@@ -4529,6 +4599,7 @@ function buildShareLink(boardId, categoryPathIds = [], accessLevel = '') {
     const encodedPath = encodeCategoryPath(categoryPathIds);
     const normalizedAccess = normalizeShareAccessLevel(accessLevel, SHARE_ACCESS_EDIT);
     if (encodedPath) params.set('category', encodedPath);
+    if (ownerId) params.set('owner', ownerId);
     params.set('access', normalizedAccess);
     return `${window.location.origin}${window.location.pathname}?${params.toString()}`;
   }
@@ -5450,6 +5521,7 @@ function renderBoardDetail() {
   } else {
     boardTitle.removeAttribute('aria-label');
   }
+  boardShareBtn?.classList.toggle('hidden', Boolean(sharedScope));
   isEditingBoardTitle = false;
   renderCategoryPanel(board);
   renderAddCategoryOptions(board);
