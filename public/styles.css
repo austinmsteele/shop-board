@@ -811,6 +811,16 @@ button:hover {
   outline: none;
 }
 
+.board-title-main.board-title-main-readonly {
+  cursor: default;
+}
+
+.board-title-main.board-title-main-readonly:hover,
+.board-title-main.board-title-main-readonly:focus-visible {
+  background: transparent;
+  color: inherit;
+}
+
 .board-title-input {
   display: block;
   margin: 0 auto;
@@ -1721,7 +1731,7 @@ body.dragging-category .category-card.category-reorder-below {
   color: #5e4f3f;
 }
 
-.new-board-form input {
+.new-board-form input:not([type="radio"]) {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -1735,6 +1745,54 @@ body.dragging-category .category-card.category-reorder-below {
   display: flex;
   justify-content: flex-end;
   gap: 0.45rem;
+}
+
+.share-access-form {
+  gap: 0.85rem;
+}
+
+#share-access-dialog {
+  width: min(420px, calc(100vw - 2rem));
+}
+
+.share-access-options {
+  margin: 0.15rem 0 0.35rem;
+  padding: 0;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.new-board-form .share-access-option {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  align-items: center;
+  column-gap: 0.55rem;
+  row-gap: 0;
+  padding: 0;
+  font-weight: 500;
+  color: #3b2f23;
+  cursor: pointer;
+}
+
+.new-board-form .share-access-option input[type="radio"] {
+  margin: 0;
+  width: 16px;
+  height: 16px;
+}
+
+.new-board-form .share-access-option span {
+  color: #3b2f23;
+  font-weight: 500;
+}
+
+.share-access-form menu {
+  margin-top: 0.65rem;
+}
+
+.share-access-error {
+  margin: 0;
+  color: #a53b2a;
+  font-weight: 600;
 }
 
 .error-dialog {
@@ -1800,6 +1858,20 @@ body.dragging-category .category-card.category-reorder-below {
 #hover-add-form {
   position: relative;
   padding-top: 1.35rem;
+}
+
+#board-edit-add-form {
+  position: relative;
+  padding-top: 1.35rem;
+}
+
+.board-edit-add-dialog {
+  width: min(740px, calc(100vw - 2rem));
+}
+
+.board-edit-add-drop-zone {
+  min-height: 128px;
+  align-content: center;
 }
 
 .hover-add-close-btn {
@@ -2042,8 +2114,32 @@ body.dragging-category .category-card.category-reorder-below {
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6);
 }
 
+.board-edit-candidate-add {
+  border: 2px dashed #d5c2ab;
+  background: #fff8ef;
+  display: grid;
+  place-items: center;
+  color: #6a4a2d;
+}
+
+.board-edit-candidate-add::after {
+  border-width: 0;
+}
+
+.board-edit-candidate-add:hover {
+  border-color: #af5f2f;
+  background: #fbe8d0;
+}
+
+.board-edit-candidate-add span {
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
 .board-edit-empty {
   margin: 0;
+  grid-column: 1 / -1;
   color: var(--muted);
   text-align: center;
   font-size: 0.9rem;
@@ -2753,6 +2849,8 @@ td img {
   place-items: center;
   color: var(--muted);
   font-weight: 650;
+  width: 100%;
+  text-align: center;
 }
 
 .card-body {
@@ -3277,6 +3375,10 @@ td img {
   color: #453d77;
 }
 
+.icon-btn.hidden {
+  display: none;
+}
+
 .icon-btn:hover {
   background: #ddd4f5;
 }
@@ -3363,6 +3465,15 @@ td img {
 .editable-token:hover {
   border-color: #d9b894;
   background: #fbf2e7;
+}
+
+.editable-token.is-readonly {
+  cursor: default;
+}
+
+.editable-token.is-readonly:hover {
+  border-color: transparent;
+  background: transparent;
 }
 
 .inline-editor {
@@ -3457,9 +3568,13 @@ textarea.inline-editor {
 
 .detail-media-center {
   display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: 0.65rem;
   min-width: 0;
   min-height: 0;
+  width: 100%;
+  justify-self: stretch;
+  align-self: stretch;
 }
 
 .detail-thumbs-row {
@@ -3532,13 +3647,18 @@ textarea.inline-editor {
 
 .detail-main-image-wrap {
   position: relative;
-  background: #eee5d9;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  background: transparent;
   border-radius: 2px;
   height: min(70vh, 760px);
   min-height: 380px;
   display: grid;
   place-items: center;
   overflow: hidden;
+  justify-self: stretch;
+  align-self: stretch;
 }
 
 .detail-main-image {
@@ -3553,6 +3673,16 @@ textarea.inline-editor {
   color: var(--muted);
   font-size: 1.1rem;
   font-weight: 700;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 0 0.5rem;
+  text-align: center;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+  background: transparent;
+  border-radius: 0;
 }
 
 .detail-main-actions {

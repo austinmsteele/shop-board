@@ -7,12 +7,17 @@ const BETA_WELCOME_FALLBACK_KEY = 'shopboard-beta-welcome-ack-v2';
 const BETA_AUTH_MODE_SIGN_IN = 'sign-in';
 const BETA_AUTH_MODE_SIGN_UP = 'sign-up';
 const ITEM_NAME_MAX_LENGTH = 200;
+const SHARE_ACCESS_EDIT = 'edit';
+const SHARE_ACCESS_FEEDBACK = 'feedback';
+const SHARE_ACCESS_VIEW = 'view';
 
 const appShell = document.querySelector('#app-shell');
 const homeScreen = document.querySelector('#home-screen');
 const homeAuthBar = document.querySelector('#home-auth-bar');
 const homeAuthBtn = document.querySelector('#home-auth-btn');
 const boardScreen = document.querySelector('#board-screen');
+const boardAuthBar = document.querySelector('#board-auth-bar');
+const boardAuthBtn = document.querySelector('#board-auth-btn');
 const boardTitle = document.querySelector('#board-title');
 const profileAvatar = document.querySelector('.profile-avatar');
 const profileName = document.querySelector('.profile-name');
@@ -100,6 +105,7 @@ const detailAddImageBtn = document.querySelector('#detail-add-image-btn');
 const detailFeedbackList = document.querySelector('#detail-feedback-list');
 const detailFeedbackComposerInput = document.querySelector('#detail-feedback-input');
 const detailFeedbackComposerGrid = document.querySelector('#detail-feedback-emoji-grid');
+const detailFeedbackComposer = document.querySelector('#detail-feedback-composer');
 const detailFeedbackSaveBtn = document.querySelector('#detail-feedback-save');
 const detailFeedbackCancelBtn = document.querySelector('#detail-feedback-cancel');
 const imagePickerDialog = document.querySelector('#image-picker-dialog');
@@ -124,6 +130,10 @@ const boardDeleteDialog = document.querySelector('#board-delete-dialog');
 const boardDeleteForm = document.querySelector('#board-delete-form');
 const boardDeleteMessage = document.querySelector('#board-delete-message');
 const boardDeleteNoBtn = document.querySelector('#board-delete-no-btn');
+const shareAccessDialog = document.querySelector('#share-access-dialog');
+const shareAccessForm = document.querySelector('#share-access-form');
+const shareAccessError = document.querySelector('#share-access-error');
+const shareAccessCancelBtn = document.querySelector('#share-access-cancel-btn');
 const errorDialog = document.querySelector('#error-dialog');
 const errorDialogTitle = document.querySelector('#error-dialog-title');
 const errorDialogMessage = document.querySelector('#error-dialog-message');
@@ -142,6 +152,13 @@ const boardEditCandidatesContainer = document.querySelector('#board-edit-candida
 const boardEditResetBtn = document.querySelector('#board-edit-reset-btn');
 const boardEditCancelBtn = document.querySelector('#board-edit-cancel-btn');
 const boardEditPreviewSlots = Array.from(document.querySelectorAll('[data-board-edit-slot]'));
+const boardEditAddDialog = document.querySelector('#board-edit-add-dialog');
+const boardEditAddForm = document.querySelector('#board-edit-add-form');
+const boardEditAddCloseBtn = document.querySelector('#board-edit-add-close-btn');
+const boardEditAddUrl = document.querySelector('#board-edit-add-url');
+const boardEditAddDropZone = document.querySelector('#board-edit-add-drop-zone');
+const boardEditAddUploadBtn = document.querySelector('#board-edit-add-upload-btn');
+const boardEditAddUploadInput = document.querySelector('#board-edit-add-upload-input');
 
 let currentUserName = profileName?.textContent?.trim() || 'ShopBoard User';
 const EMOJI_OPTIONS = ['👍', '👎', '❌', '🔥', '🏆', '🥇', '🥈', '🥉', '😎', '🤮', '❤️', '😕', '👀'];
@@ -196,15 +213,20 @@ let activeFeedbackItemId = null;
 let activeFeedbackEditingId = null;
 let activeCategoryPath = [];
 let activeImageRootCategoryId = '';
+let sharedCategoryScopeBoardId = '';
+let sharedCategoryScopePath = [];
+let sharedCategoryScopeAccess = SHARE_ACCESS_EDIT;
 let createDialogMode = 'board';
 let boardEditTargetId = null;
 let boardEditPreviewDraft = ['', '', ''];
 let boardEditActiveSlot = 0;
+let boardEditCustomCandidates = [];
 const expandedCategoryIds = new Set();
 let draggingBoardId = null;
 let addCategoryTargetValue = '';
 let pendingCategoryDeleteResolve = null;
 let pendingBoardDeleteResolve = null;
+let pendingShareAccessResolve = null;
 let pendingCategoryParentId = null;
 let draggingCategoryItemId = null;
 let draggingCategoryId = null;
@@ -251,6 +273,7 @@ homeAuthLogoutBtn.className = 'home-auth-menu-btn';
 homeAuthLogoutBtn.setAttribute('role', 'menuitem');
 homeAuthLogoutBtn.textContent = 'Log Out';
 homeAuthMenu.appendChild(homeAuthLogoutBtn);
+let activeAuthMenuAnchor = null;
 const tableBodyDropEndState = new WeakMap();
 const itemGridDropEndState = new WeakMap();
 let undoHistory = [];
@@ -411,7 +434,11 @@ authDialog?.addEventListener('close', () => {
 
 homeAuthBtn?.addEventListener('click', (event) => {
   event.stopPropagation();
-  void handleHomeAuthButtonClick();
+  void handleHomeAuthButtonClick(homeAuthBtn);
+});
+boardAuthBtn?.addEventListener('click', (event) => {
+  event.stopPropagation();
+  void handleHomeAuthButtonClick(boardAuthBtn);
 });
 homeAuthMenu.addEventListener('click', (event) => {
   event.stopPropagation();
@@ -423,6 +450,7 @@ homeAuthLogoutBtn.addEventListener('click', (event) => {
 });
 
 backHomeBtn.addEventListener('click', () => {
+  clearSharedCategoryScope();
   activeBoardId = null;
   activeCategoryPath = [];
   setStatus('');
@@ -475,17 +503,86 @@ boardEditForm?.addEventListener('submit', (event) => {
 });
 
 boardEditDialog?.addEventListener('close', () => {
+  if (boardEditAddDialog?.open) boardEditAddDialog.close();
   boardEditTargetId = null;
+  boardEditCustomCandidates = [];
   if (boardEditCandidatesContainer) {
     boardEditCandidatesContainer.innerHTML = '';
   }
 });
+
+if (boardEditAddForm) {
+  boardEditAddForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    addBoardEditImageUrl();
+  });
+}
+
+if (boardEditAddCloseBtn && boardEditAddDialog) {
+  boardEditAddCloseBtn.addEventListener('click', (event) => {
+    event.preventDefault();
+    boardEditAddDialog.close();
+  });
+}
+
+if (boardEditAddUploadBtn && boardEditAddUploadInput) {
+  boardEditAddUploadBtn.addEventListener('click', (event) => {
+    event.preventDefault();
+    boardEditAddUploadInput.click();
+  });
+  boardEditAddUploadInput.addEventListener('change', () => {
+    addBoardEditUploadedImage();
+  });
+}
+
+if (boardEditAddDropZone && boardEditAddUploadInput) {
+  boardEditAddDropZone.addEventListener('click', () => {
+    boardEditAddUploadInput.click();
+  });
+  boardEditAddDropZone.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    boardEditAddUploadInput.click();
+  });
+  boardEditAddDropZone.addEventListener('dragenter', (event) => {
+    event.preventDefault();
+    boardEditAddDropZone.classList.add('is-drag-over');
+  });
+  boardEditAddDropZone.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    boardEditAddDropZone.classList.add('is-drag-over');
+  });
+  boardEditAddDropZone.addEventListener('dragleave', (event) => {
+    const related = event.relatedTarget;
+    if (related instanceof Node && boardEditAddDropZone.contains(related)) return;
+    boardEditAddDropZone.classList.remove('is-drag-over');
+  });
+  boardEditAddDropZone.addEventListener('drop', (event) => {
+    event.preventDefault();
+    boardEditAddDropZone.classList.remove('is-drag-over');
+    const { file, url } = getDroppedImageData(event.dataTransfer);
+    if (file) {
+      addBoardEditUploadedImage(file);
+      return;
+    }
+    if (url) addBoardEditImageUrl(url);
+  });
+}
+
+if (boardEditAddDialog) {
+  boardEditAddDialog.addEventListener('close', () => {
+    if (boardEditAddUrl) boardEditAddUrl.value = '';
+    if (boardEditAddUploadInput) boardEditAddUploadInput.value = '';
+    boardEditAddDropZone?.classList.remove('is-drag-over');
+  });
+}
 
 addForm.addEventListener('submit', async (event) => {
   event.preventDefault();
 
   const board = getActiveBoard();
   if (!board) return;
+  if (!ensureSharedBoardEditAccess('add items to this category', board)) return;
 
   const rawUrl = urlInput.value.trim();
   const normalizedUrl = normalizeProductUrl(rawUrl);
@@ -947,6 +1044,7 @@ if (boardScreen) {
     const editTrigger = targetElement.closest('.edit-categories-btn');
     if (editTrigger) {
       event.preventDefault();
+      if (!ensureSharedBoardEditAccess('edit fields')) return;
       const scopedCategoryId = String(
         editTrigger.getAttribute('data-field-scope-category-id')
           || editTrigger.closest('.category-card')?.getAttribute('data-category-id')
@@ -960,6 +1058,7 @@ if (boardScreen) {
     const addTrigger = targetElement.closest('.add-category-inline-btn');
     if (addTrigger) {
       event.preventDefault();
+      if (!ensureSharedBoardEditAccess('edit fields')) return;
       openAddCategoryDialog();
       return;
     }
@@ -967,6 +1066,7 @@ if (boardScreen) {
     const saveTrigger = targetElement.closest('.save-categories-inline-btn');
     if (saveTrigger) {
       event.preventDefault();
+      if (!ensureSharedBoardEditAccess('save field changes')) return;
       saveInlineCategoryHeaderEdit();
       return;
     }
@@ -981,6 +1081,7 @@ if (boardScreen) {
     const deleteTrigger = targetElement.closest('.category-header-delete-btn');
     if (deleteTrigger) {
       event.preventDefault();
+      if (!ensureSharedBoardEditAccess('delete fields')) return;
       const categoryId = String(deleteTrigger.getAttribute('data-category-id') || '');
       if (categoryId) deleteCategoryFromHeaderDraft(categoryId);
     }
@@ -1062,6 +1163,7 @@ if (categoryAddCancelBtn) {
 if (categoryAddForm) {
   categoryAddForm.addEventListener('submit', (event) => {
     event.preventDefault();
+    if (!ensureSharedBoardEditAccess('add fields')) return;
     const name = String(categoryAddNameInput?.value || '').trim();
     if (!name) {
       setStatus('Field name is required.', true);
@@ -1155,6 +1257,37 @@ if (boardDeleteDialog) {
   });
 }
 
+if (shareAccessCancelBtn) {
+  shareAccessCancelBtn.addEventListener('click', () => {
+    if (shareAccessDialog?.open) shareAccessDialog.close();
+  });
+}
+
+if (shareAccessForm) {
+  shareAccessForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const selected = shareAccessForm.querySelector('input[name="share-access-level"]:checked');
+    const value = selected instanceof HTMLInputElement ? selected.value : '';
+    if (!isShareAccessLevel(value)) {
+      setShareAccessDialogError('Select one access level to continue.');
+      return;
+    }
+    setShareAccessDialogError('');
+    resolveShareAccessPrompt(value);
+    if (shareAccessDialog?.open) shareAccessDialog.close();
+  });
+}
+
+if (shareAccessDialog) {
+  shareAccessDialog.addEventListener('close', () => {
+    setShareAccessDialogError('');
+    clearShareAccessDialogSelection();
+    if (pendingShareAccessResolve) {
+      resolveShareAccessPrompt(null);
+    }
+  });
+}
+
 if (errorDialogCloseBtn) {
   errorDialogCloseBtn.addEventListener('click', () => {
     closeErrorDialog();
@@ -1182,12 +1315,14 @@ if (newBoardForm) {
 
 if (addCategoryBtn) {
   addCategoryBtn.addEventListener('click', () => {
+    if (!ensureSharedBoardEditAccess('add categories')) return;
     openNewBoardDialog('category');
   });
 }
 
 if (categoryChildren) {
   categoryChildren.addEventListener('dragover', (event) => {
+    if (!canEditSharedBoardContent(getActiveBoard())) return;
     const draggedCategoryId = getDraggedCategoryId(event);
     if (draggedCategoryId) return;
     const draggedId = getDraggedItemId(event);
@@ -1200,6 +1335,7 @@ if (categoryChildren) {
   });
 
   categoryChildren.addEventListener('drop', (event) => {
+    if (!canEditSharedBoardContent(getActiveBoard())) return;
     const draggedCategoryId = getDraggedCategoryId(event);
     if (draggedCategoryId) return;
     const draggedId = getDraggedItemId(event);
@@ -1485,6 +1621,7 @@ editForm.addEventListener('submit', (event) => {
     editDialog.close();
     return;
   }
+  if (!ensureSharedBoardEditAccess('edit items', board)) return;
 
   const item = findItemInActiveCollection(board, editingItemId);
   if (!item) {
@@ -1719,19 +1856,23 @@ function applySessionIdentity(user) {
   if (homeAuthBar) {
     homeAuthBar.classList.remove('hidden');
   }
-  if (homeAuthBtn) {
+  if (boardAuthBar) {
+    boardAuthBar.classList.remove('hidden');
+  }
+  const authButtons = [homeAuthBtn, boardAuthBtn].filter(Boolean);
+  for (const authBtn of authButtons) {
     const isAuthenticated = Boolean(user);
     const username = deriveAuthUsername(user) || fallbackName;
-    homeAuthBtn.textContent = isAuthenticated ? username : 'Sign Up / Log In';
-    homeAuthBtn.classList.toggle('is-authenticated', isAuthenticated);
+    authBtn.textContent = isAuthenticated ? username : 'Sign Up / Log In';
+    authBtn.classList.toggle('is-authenticated', isAuthenticated);
     if (isAuthenticated) {
-      homeAuthBtn.setAttribute('aria-haspopup', 'menu');
-      homeAuthBtn.setAttribute('aria-expanded', 'false');
+      authBtn.setAttribute('aria-haspopup', 'menu');
+      authBtn.setAttribute('aria-expanded', 'false');
     } else {
-      homeAuthBtn.removeAttribute('aria-haspopup');
-      homeAuthBtn.removeAttribute('aria-expanded');
+      authBtn.removeAttribute('aria-haspopup');
+      authBtn.removeAttribute('aria-expanded');
     }
-    homeAuthBtn.setAttribute(
+    authBtn.setAttribute(
       'aria-label',
       isAuthenticated
         ? `Open account menu for ${username}`
@@ -1747,18 +1888,19 @@ function applySessionIdentity(user) {
   }
 }
 
-async function handleHomeAuthButtonClick() {
+async function handleHomeAuthButtonClick(anchorBtn = null) {
   if (!activeSessionUser) {
     promptAuthForAction('Sign in or create an account to create and save your own boards.');
     return;
   }
-  toggleHomeAuthMenu();
+  toggleHomeAuthMenu(anchorBtn || homeAuthBtn || boardAuthBtn);
 }
 
 async function performHomeSignOut() {
-  if (homeAuthBtn) {
-    homeAuthBtn.setAttribute('disabled', 'true');
-    homeAuthBtn.textContent = 'Signing Out...';
+  const authButtons = [homeAuthBtn, boardAuthBtn].filter(Boolean);
+  for (const authBtn of authButtons) {
+    authBtn.setAttribute('disabled', 'true');
+    authBtn.textContent = 'Signing Out...';
   }
 
   try {
@@ -1773,6 +1915,7 @@ async function performHomeSignOut() {
     activeSessionUser = null;
     hasHydratedData = false;
     hydratedSessionOwnerKey = '';
+    clearSharedCategoryScope();
     activeBoardId = null;
     activeCategoryPath = [];
     data = { boards: [] };
@@ -1788,9 +1931,14 @@ async function performHomeSignOut() {
     setStatus('Could not sign out right now.');
     console.warn('Could not sign out:', error);
   } finally {
-    homeAuthBtn?.removeAttribute('disabled');
+    for (const authBtn of authButtons) {
+      authBtn.removeAttribute('disabled');
+    }
     if (activeSessionUser) {
-      homeAuthBtn.textContent = deriveAuthUsername(activeSessionUser) || currentUserName;
+      const username = deriveAuthUsername(activeSessionUser) || currentUserName;
+      for (const authBtn of authButtons) {
+        authBtn.textContent = username;
+      }
     }
   }
 }
@@ -1799,7 +1947,11 @@ function closeHomeAuthMenu() {
   if (!homeAuthMenu || homeAuthMenu.classList.contains('hidden')) return;
   homeAuthMenu.classList.add('hidden');
   homeAuthMenu.setAttribute('aria-hidden', 'true');
-  if (homeAuthBtn) homeAuthBtn.setAttribute('aria-expanded', 'false');
+  const authButtons = [homeAuthBtn, boardAuthBtn].filter(Boolean);
+  for (const authBtn of authButtons) {
+    authBtn.setAttribute('aria-expanded', 'false');
+  }
+  activeAuthMenuAnchor = null;
 }
 
 function positionHomeAuthMenu(anchorEl) {
@@ -1820,21 +1972,27 @@ function positionHomeAuthMenu(anchorEl) {
   homeAuthMenu.style.top = `${Math.round(top)}px`;
 }
 
-function toggleHomeAuthMenu() {
-  if (!activeSessionUser || !homeAuthBtn) {
+function toggleHomeAuthMenu(anchorEl = null) {
+  const targetAnchor = anchorEl || homeAuthBtn || boardAuthBtn;
+  if (!activeSessionUser || !targetAnchor) {
     closeHomeAuthMenu();
     return;
   }
-  if (!homeAuthMenu.classList.contains('hidden')) {
+  if (!homeAuthMenu.classList.contains('hidden') && activeAuthMenuAnchor === targetAnchor) {
     closeHomeAuthMenu();
     return;
   }
   closeBoardMenu();
   closeRankMenu();
+  const authButtons = [homeAuthBtn, boardAuthBtn].filter(Boolean);
+  for (const authBtn of authButtons) {
+    authBtn.setAttribute('aria-expanded', 'false');
+  }
   homeAuthMenu.classList.remove('hidden');
   homeAuthMenu.setAttribute('aria-hidden', 'false');
-  homeAuthBtn.setAttribute('aria-expanded', 'true');
-  positionHomeAuthMenu(homeAuthBtn);
+  targetAnchor.setAttribute('aria-expanded', 'true');
+  activeAuthMenuAnchor = targetAnchor;
+  positionHomeAuthMenu(targetAnchor);
 }
 
 async function fetchAuthSessionState() {
@@ -1968,6 +2126,7 @@ function beginAuthRecovery(message = 'Session expired. Sign in again to continue
   appReady = false;
   hasHydratedData = false;
   hydratedSessionOwnerKey = '';
+  clearSharedCategoryScope();
   activeBoardId = null;
   activeCategoryPath = [];
   data = { boards: [] };
@@ -2408,6 +2567,7 @@ function applyFavoriteRankClass(element, item) {
 function setItemFavoriteRank(itemId, rank = '') {
   const board = getActiveBoard();
   if (!board || !itemId) return;
+  if (!ensureSharedBoardEditAccess('set favorites', board)) return;
   const item = findItemInBoard(board, itemId);
   if (!item) return;
   const normalized = normalizeFavoriteRank(rank);
@@ -2460,6 +2620,7 @@ function positionRankMenu(anchorEl) {
 function openRankMenu(itemId, triggerBtn) {
   const board = getActiveBoard();
   if (!board || !itemId || !triggerBtn || !rankMenu) return;
+  if (!canEditSharedBoardContent(board)) return;
   const item = findItemInBoard(board, itemId);
   if (!item) return;
 
@@ -2527,6 +2688,7 @@ function restoreDataSnapshot(serialized) {
   if (!restored) return false;
   data = restored;
   if (activeBoardId && !data.boards.some((board) => board.id === activeBoardId)) {
+    clearSharedCategoryScope();
     activeBoardId = null;
     activeCategoryPath = [];
   }
@@ -3004,14 +3166,45 @@ function getEffectiveLeafProxy(node) {
   return only;
 }
 
+function isPathPrefix(prefixPath = [], fullPath = []) {
+  if (!Array.isArray(prefixPath) || !Array.isArray(fullPath)) return false;
+  if (prefixPath.length > fullPath.length) return false;
+  for (let index = 0; index < prefixPath.length; index += 1) {
+    if (String(prefixPath[index] || '') !== String(fullPath[index] || '')) return false;
+  }
+  return true;
+}
+
+function getSharedScopeVisibleChildren(board, parentPathIds = [], children = []) {
+  const list = Array.isArray(children) ? children : [];
+  const sharedScope = getActiveSharedCategoryScope(board);
+  if (!sharedScope) return list;
+  const requestedPath = Array.isArray(sharedScope.requestedPath) ? sharedScope.requestedPath : [];
+  const parentPath = Array.isArray(parentPathIds) ? parentPathIds.filter(Boolean) : [];
+  if (!requestedPath.length) return list;
+
+  if (isPathPrefix(requestedPath, parentPath)) {
+    // Already inside shared branch: show full subtree under it.
+    return list;
+  }
+  return [];
+}
+
 function getCurrentCategoryChildren(board) {
   const node = getActiveCategoryNode(board);
   if (node) {
     const proxy = getEffectiveLeafProxy(node);
     if (proxy) return [];
-    return Array.isArray(node.children) ? node.children : [];
+    const children = Array.isArray(node.children) ? node.children : [];
+    return getSharedScopeVisibleChildren(board, activeCategoryPath, children);
   }
-  return Array.isArray(board?.categories) ? board.categories : [];
+  const sharedScope = getActiveSharedCategoryScope(board);
+  if (sharedScope) {
+    const scopeNode = getCategoryNodeByPath(board, sharedScope.requestedPath);
+    return scopeNode ? [scopeNode] : [];
+  }
+  const roots = Array.isArray(board?.categories) ? board.categories : [];
+  return roots;
 }
 
 function getCurrentItems(board) {
@@ -3021,13 +3214,29 @@ function getCurrentItems(board) {
     if (proxy) return Array.isArray(proxy.items) ? proxy.items : [];
     return Array.isArray(node.items) ? node.items : [];
   }
-  // Root-level uncategorized items must remain visible even when categories exist.
+  const sharedScope = getActiveSharedCategoryScope(board);
+  if (sharedScope) {
+    const scopeNode = getCategoryNodeByPath(board, sharedScope.requestedPath);
+    if (scopeNode) {
+      const proxy = getEffectiveLeafProxy(scopeNode);
+      if (proxy) return Array.isArray(proxy.items) ? proxy.items : [];
+      return Array.isArray(scopeNode.items) ? scopeNode.items : [];
+    }
+  }
+  // Root-level uncategorized items must remain visible in normal board mode.
   return Array.isArray(board?.items) ? board.items : [];
 }
 
 function getCurrentCategoryCollection(board) {
   const node = getActiveCategoryNode(board);
   if (node) return Array.isArray(node.children) ? node.children : [];
+  const sharedScope = getActiveSharedCategoryScope(board);
+  if (sharedScope) {
+    const parentPath = sharedScope.requestedPath.slice(0, -1);
+    if (!parentPath.length) return Array.isArray(board?.categories) ? board.categories : [];
+    const parentNode = getCategoryNodeByPath(board, parentPath);
+    return Array.isArray(parentNode?.children) ? parentNode.children : [];
+  }
   return Array.isArray(board?.categories) ? board.categories : [];
 }
 
@@ -3039,6 +3248,43 @@ function decodeCategoryPath(value) {
   const raw = String(value || '').trim();
   if (!raw) return [];
   return raw.split('>').filter(Boolean);
+}
+
+function normalizeShareAccessLevel(value, fallback = SHARE_ACCESS_EDIT) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (isShareAccessLevel(raw)) return raw;
+  return String(fallback || '').trim().toLowerCase() || SHARE_ACCESS_EDIT;
+}
+
+function isShareAccessLevel(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  return raw === SHARE_ACCESS_EDIT || raw === SHARE_ACCESS_FEEDBACK || raw === SHARE_ACCESS_VIEW;
+}
+
+function getBoardShareAccessLevel(board = null) {
+  const activeBoard = board || getActiveBoard();
+  if (!activeBoard) return SHARE_ACCESS_EDIT;
+  if (String(sharedCategoryScopeBoardId || '') !== String(activeBoard.id || '')) return SHARE_ACCESS_EDIT;
+  return normalizeShareAccessLevel(sharedCategoryScopeAccess, SHARE_ACCESS_EDIT);
+}
+
+function canEditSharedBoardContent(board = null) {
+  return getBoardShareAccessLevel(board) === SHARE_ACCESS_EDIT;
+}
+
+function canManageFeedbackInSharedScope(board = null) {
+  const access = getBoardShareAccessLevel(board);
+  return access === SHARE_ACCESS_EDIT || access === SHARE_ACCESS_FEEDBACK;
+}
+
+function ensureSharedBoardEditAccess(action = 'make changes', board = null) {
+  void action;
+  return canEditSharedBoardContent(board);
+}
+
+function ensureSharedFeedbackAccess(action = 'manage feedback', board = null) {
+  void action;
+  return canManageFeedbackInSharedScope(board);
 }
 
 function getCategoryItemCollectionByPath(board, pathIds) {
@@ -3103,6 +3349,7 @@ function collectLeafCategoryTargets(board) {
 function collectCategoryOptionTargets(board) {
   const out = [];
   const roots = Array.isArray(board?.categories) ? board.categories : [];
+  const sharedScope = getActiveSharedCategoryScope(board);
 
   function visit(node, pathIds, depth) {
     if (!node) return;
@@ -3113,7 +3360,17 @@ function collectCategoryOptionTargets(board) {
       depth
     });
     const children = Array.isArray(node.children) ? node.children : [];
-    for (const child of children) visit(child, nextIds, depth + 1);
+    const visibleChildren = getSharedScopeVisibleChildren(board, nextIds, children);
+    for (const child of visibleChildren) visit(child, nextIds, depth + 1);
+  }
+
+  if (sharedScope) {
+    const requestedPath = Array.isArray(sharedScope.requestedPath) ? sharedScope.requestedPath : [];
+    const scopeNode = getCategoryNodeByPath(board, requestedPath);
+    if (!scopeNode) return out;
+    const parentPath = requestedPath.slice(0, -1);
+    visit(scopeNode, parentPath, 0);
+    return out;
   }
 
   for (const root of roots) visit(root, [], 0);
@@ -3717,34 +3974,83 @@ function readInitialShareIntent() {
     const url = new URL(window.location.href);
     const boardId = String(url.searchParams.get('board') || '').trim();
     const categoryParam = String(url.searchParams.get('category') || '').trim();
+    const accessParam = String(url.searchParams.get('access') || '').trim().toLowerCase();
     return {
       boardId,
-      categoryParam
+      categoryParam,
+      accessParam
     };
   } catch {
     return {
       boardId: '',
-      categoryParam: ''
+      categoryParam: '',
+      accessParam: ''
     };
   }
+}
+
+function clearSharedCategoryScope() {
+  sharedCategoryScopeBoardId = '';
+  sharedCategoryScopePath = [];
+  sharedCategoryScopeAccess = SHARE_ACCESS_EDIT;
+}
+
+function setSharedCategoryScope(boardId, requestedPath = [], accessLevel = SHARE_ACCESS_EDIT) {
+  const path = Array.isArray(requestedPath) ? requestedPath.filter(Boolean) : [];
+  if (!boardId) {
+    clearSharedCategoryScope();
+    return;
+  }
+  sharedCategoryScopeBoardId = String(boardId);
+  sharedCategoryScopePath = [...path];
+  sharedCategoryScopeAccess = normalizeShareAccessLevel(accessLevel, SHARE_ACCESS_EDIT);
+}
+
+function getActiveSharedCategoryScope(board) {
+  if (!board) return null;
+  if (!sharedCategoryScopePath.length) return null;
+  if (String(sharedCategoryScopeBoardId || '') !== String(board.id || '')) return null;
+  const requestedNode = getCategoryNodeByPath(board, sharedCategoryScopePath);
+  if (!requestedNode) return null;
+  const title = String(requestedNode?.name || board.name || '').trim() || board.name;
+  return {
+    requestedPath: [...sharedCategoryScopePath],
+    title,
+    access: normalizeShareAccessLevel(sharedCategoryScopeAccess, SHARE_ACCESS_EDIT)
+  };
 }
 
 function applyInitialShareLinkState() {
   const boardId = String(initialShareIntent?.boardId || '').trim();
   const categoryParam = String(initialShareIntent?.categoryParam || '').trim();
+  const accessParam = String(initialShareIntent?.accessParam || '').trim();
   if (!boardId) return false;
+  clearSharedCategoryScope();
   const board = data.boards.find((entry) => entry.id === boardId);
   if (!board) return false;
   activeBoardId = board.id;
   if (!categoryParam) {
+    setSharedCategoryScope(board.id, [], accessParam);
     activeCategoryPath = [];
     initialShareIntent = null;
     return true;
   }
   const requestedPath = decodeCategoryPath(categoryParam);
-  activeCategoryPath = requestedPath.length && getCategoryNodeByPath(board, requestedPath)
-    ? requestedPath
-    : [];
+  const sharedNode = requestedPath.length ? getCategoryNodeByPath(board, requestedPath) : null;
+  if (sharedNode) {
+    setSharedCategoryScope(board.id, requestedPath, accessParam);
+    activeCategoryPath = [];
+    activeImageRootCategoryId = '';
+    expandedCategoryIds.clear();
+    for (const id of requestedPath) {
+      if (!id) continue;
+      expandedCategoryIds.add(id);
+    }
+    lastExpandedCategoryId = requestedPath[requestedPath.length - 1] || '';
+  } else {
+    setSharedCategoryScope(board.id, [], accessParam);
+    activeCategoryPath = [];
+  }
   initialShareIntent = null;
   return true;
 }
@@ -3861,7 +4167,7 @@ function renderBoardsHome() {
           event.stopPropagation();
           event.preventDefault();
           setMenuOpen(false);
-          copyBoardShareLink(board);
+          void copyBoardShareLink(board);
         });
       }
 
@@ -3877,6 +4183,7 @@ function renderBoardsHome() {
 
     openBtn.addEventListener('click', () => {
       closeBoardMenu();
+      clearSharedCategoryScope();
       activeBoardId = board.id;
       activeCategoryPath = [];
       setStatus('');
@@ -3959,33 +4266,148 @@ function renderBoardEditPreviewSlots() {
   });
 }
 
+function normalizeBoardEditImageSource(rawSource = '') {
+  const normalized = normalizeImageCandidateUrl(String(rawSource || ''));
+  if (!normalized) return '';
+  if (/^https?:\/\//i.test(normalized) || /^data:image\//i.test(normalized)) return normalized;
+  return '';
+}
+
+function rememberBoardEditCustomCandidate(imageSrc, options = {}) {
+  const normalized = normalizeBoardEditImageSource(imageSrc);
+  if (!normalized) return '';
+  const key = canonicalImageKey(normalized) || normalized.toLowerCase();
+  const existingIndex = boardEditCustomCandidates.findIndex((entry) => {
+    const entryNormalized = normalizeBoardEditImageSource(entry);
+    if (!entryNormalized) return false;
+    return (canonicalImageKey(entryNormalized) || entryNormalized.toLowerCase()) === key;
+  });
+  if (existingIndex >= 0) {
+    const [existing] = boardEditCustomCandidates.splice(existingIndex, 1);
+    if (options.prepend) boardEditCustomCandidates.unshift(existing);
+    return existing;
+  }
+  if (options.prepend) {
+    boardEditCustomCandidates.unshift(normalized);
+  } else {
+    boardEditCustomCandidates.push(normalized);
+  }
+  return normalized;
+}
+
+function collectBoardEditImageCandidates(board, limit = 60) {
+  const merged = [];
+  const seen = new Set();
+  const append = (value) => {
+    const normalized = normalizeBoardEditImageSource(value);
+    if (!normalized) return;
+    const key = canonicalImageKey(normalized) || normalized.toLowerCase();
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    merged.push(normalized);
+  };
+
+  boardEditCustomCandidates.forEach(append);
+  boardEditPreviewDraft.forEach(append);
+  getBoardFeaturedImageCandidates(board, limit).forEach(append);
+
+  return merged.slice(0, limit);
+}
+
+function openBoardEditAddDialog() {
+  const board = getBoardEditTargetBoard();
+  if (!board || !boardEditAddDialog) return;
+  if (boardEditAddUrl) boardEditAddUrl.value = '';
+  if (boardEditAddUploadInput) boardEditAddUploadInput.value = '';
+  boardEditAddDropZone?.classList.remove('is-drag-over');
+  if (!boardEditAddDialog.open) boardEditAddDialog.showModal();
+  if (boardEditAddUrl) setTimeout(() => boardEditAddUrl.focus(), 0);
+}
+
+function applyBoardEditImageToActiveSlot(imageSrc, options = {}) {
+  const normalized = normalizeBoardEditImageSource(imageSrc);
+  if (!normalized) return false;
+  boardEditPreviewDraft[boardEditActiveSlot] = normalized;
+  rememberBoardEditCustomCandidate(normalized, { prepend: true });
+  renderBoardEditPreviewSlots();
+  renderBoardEditCandidates();
+  if (options.closeDialog !== false && boardEditAddDialog?.open) {
+    boardEditAddDialog.close();
+  }
+  return true;
+}
+
+function addBoardEditImageUrl(overrideUrl = '') {
+  const url = String(overrideUrl || boardEditAddUrl?.value || '').trim();
+  if (!url) return;
+  const didApply = applyBoardEditImageToActiveSlot(url);
+  if (!didApply) {
+    setStatus('Please enter a valid image URL.', true);
+    return;
+  }
+  if (boardEditAddUrl) boardEditAddUrl.value = '';
+}
+
+function addBoardEditUploadedImage(fileOverride = null) {
+  const file = fileOverride || boardEditAddUploadInput?.files?.[0] || null;
+  if (!file || !/^image\//i.test(String(file.type || ''))) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const dataUrl = String(reader.result || '').trim();
+    if (!dataUrl) return;
+    const optimizedDataUrl = await optimizeUploadedImageDataUrl(dataUrl);
+    const didApply = applyBoardEditImageToActiveSlot(optimizedDataUrl || dataUrl);
+    if (!didApply) return;
+    if (boardEditAddUploadInput) boardEditAddUploadInput.value = '';
+  };
+  reader.readAsDataURL(file);
+}
+
 function renderBoardEditCandidates(boardParam) {
   if (!boardEditCandidatesContainer) return;
   boardEditCandidatesContainer.innerHTML = '';
   const board = boardParam || getBoardEditTargetBoard();
   if (!board) return;
-  const candidates = getBoardFeaturedImageCandidates(board);
+
+  const addButton = document.createElement('button');
+  addButton.type = 'button';
+  addButton.className = 'board-edit-candidate board-edit-candidate-add';
+  addButton.setAttribute('role', 'listitem');
+  addButton.setAttribute('aria-label', 'Add image');
+  addButton.innerHTML = '<span aria-hidden="true">+</span>';
+  addButton.addEventListener('click', () => {
+    openBoardEditAddDialog();
+  });
+  boardEditCandidatesContainer.appendChild(addButton);
+
+  const candidates = collectBoardEditImageCandidates(board);
   if (!candidates.length) {
     const empty = document.createElement('p');
     empty.className = 'board-edit-empty';
-    empty.textContent = 'No featured images exist on this board yet.';
+    empty.textContent = 'No featured images yet. Use + to add one.';
     boardEditCandidatesContainer.appendChild(empty);
     return;
   }
-  const activeValue = boardEditPreviewDraft[boardEditActiveSlot] || '';
+  const activeValue = normalizeBoardEditImageSource(boardEditPreviewDraft[boardEditActiveSlot] || '');
+  const activeKey = canonicalImageKey(activeValue) || activeValue;
+  const assignedKeys = new Set(
+    boardEditPreviewDraft
+      .map((value) => normalizeBoardEditImageSource(value))
+      .map((value) => canonicalImageKey(value) || value)
+      .filter(Boolean)
+  );
   for (const src of candidates) {
+    const srcKey = canonicalImageKey(src) || src;
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'board-edit-candidate';
     button.setAttribute('role', 'listitem');
     button.style.backgroundImage = `url("${escapeCssUrl(src)}")`;
-    button.setAttribute('aria-pressed', src === activeValue ? 'true' : 'false');
-    button.classList.toggle('selected', src === activeValue);
-    button.classList.toggle('assigned', boardEditPreviewDraft.some((value) => value === src));
+    button.setAttribute('aria-pressed', srcKey === activeKey ? 'true' : 'false');
+    button.classList.toggle('selected', srcKey === activeKey);
+    button.classList.toggle('assigned', assignedKeys.has(srcKey));
     button.addEventListener('click', () => {
-      boardEditPreviewDraft[boardEditActiveSlot] = src;
-      renderBoardEditPreviewSlots();
-      renderBoardEditCandidates(board);
+      applyBoardEditImageToActiveSlot(src, { closeDialog: false });
     });
     boardEditCandidatesContainer.appendChild(button);
   }
@@ -4018,6 +4440,10 @@ function openBoardEditDialog(boardId) {
   boardEditTargetId = boardId;
   boardEditNameInput.value = board.name;
   boardEditPreviewDraft = getBoardPreviewImages(board, 3);
+  boardEditCustomCandidates = [];
+  boardEditPreviewDraft.forEach((value) => {
+    rememberBoardEditCustomCandidate(value);
+  });
   setBoardEditActiveSlot(0);
   if (!boardEditDialog.open) boardEditDialog.showModal();
   setTimeout(() => boardEditNameInput?.focus(), 0);
@@ -4046,73 +4472,156 @@ function confirmDeleteBoard(board, totalItems = 0) {
   });
 }
 
-function copyBoardShareLink(board) {
+async function copyBoardShareLink(board) {
   if (!board) return;
-  const link = buildBoardShareLink(board.id);
+  const selectedAccess = await promptCategoryShareAccess();
+  if (!selectedAccess) return;
+  const link = buildBoardShareLink(board.id, selectedAccess);
   if (!link) return;
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(link).then(
-      () => setStatus(`Board share link copied.`),
-      () => fallbackCopyShareLink(link)
-    );
-  } else {
-    fallbackCopyShareLink(link);
-  }
+  copyShareLink(link, {
+    successMessage: 'Board link copied to clipboard.',
+    promptTitle: 'Copy board link'
+  });
 }
 
-function copyCategoryShareLink(board, categoryPathIds = []) {
+async function copyCategoryShareLink(board, categoryPathIds = []) {
   if (!board) return;
   const path = Array.isArray(categoryPathIds) ? categoryPathIds.filter(Boolean) : [];
   if (!path.length) {
-    copyBoardShareLink(board);
+    await copyBoardShareLink(board);
     return;
   }
-  const link = buildCategoryShareLink(board.id, path);
+  const selectedAccess = await promptCategoryShareAccess();
+  if (!selectedAccess) return;
+  const link = buildCategoryShareLink(board.id, path, selectedAccess);
   if (!link) return;
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(link).then(
-      () => setStatus('Category share link copied.'),
-      () => fallbackCopyShareLink(link, { promptTitle: 'Copy category link', statusMessage: 'Category share link ready to copy.' })
-    );
-  } else {
-    fallbackCopyShareLink(link, { promptTitle: 'Copy category link', statusMessage: 'Category share link ready to copy.' });
-  }
+  copyShareLink(link, {
+    successMessage: 'Category link copied to clipboard.',
+    promptTitle: 'Copy category link'
+  });
 }
 
-function buildBoardShareLink(boardId) {
-  return buildShareLink(boardId, []);
+function buildBoardShareLink(boardId, accessLevel = SHARE_ACCESS_EDIT) {
+  return buildShareLink(boardId, [], accessLevel);
 }
 
-function buildCategoryShareLink(boardId, categoryPathIds = []) {
-  return buildShareLink(boardId, categoryPathIds);
+function buildCategoryShareLink(boardId, categoryPathIds = [], accessLevel = SHARE_ACCESS_EDIT) {
+  return buildShareLink(boardId, categoryPathIds, accessLevel);
 }
 
-function buildShareLink(boardId, categoryPathIds = []) {
+function buildShareLink(boardId, categoryPathIds = [], accessLevel = '') {
   if (!boardId) return '';
   try {
     const url = new URL(window.location.href);
     url.searchParams.set('board', boardId);
     const encodedPath = encodeCategoryPath(categoryPathIds);
+    const normalizedAccess = normalizeShareAccessLevel(accessLevel, SHARE_ACCESS_EDIT);
     if (encodedPath) {
       url.searchParams.set('category', encodedPath);
     } else {
       url.searchParams.delete('category');
     }
+    url.searchParams.set('access', normalizedAccess);
     return url.toString();
   } catch {
     const params = new URLSearchParams();
     params.set('board', boardId);
     const encodedPath = encodeCategoryPath(categoryPathIds);
+    const normalizedAccess = normalizeShareAccessLevel(accessLevel, SHARE_ACCESS_EDIT);
     if (encodedPath) params.set('category', encodedPath);
+    params.set('access', normalizedAccess);
     return `${window.location.origin}${window.location.pathname}?${params.toString()}`;
   }
 }
 
-function fallbackCopyShareLink(link, options = {}) {
+function setShareAccessDialogError(message = '') {
+  if (!shareAccessError) return;
+  const text = String(message || '').trim();
+  shareAccessError.textContent = text;
+  shareAccessError.classList.toggle('hidden', !text);
+}
+
+function clearShareAccessDialogSelection() {
+  if (!shareAccessForm) return;
+  shareAccessForm.querySelectorAll('input[name="share-access-level"]').forEach((input) => {
+    if (input instanceof HTMLInputElement) input.checked = false;
+  });
+}
+
+function resolveShareAccessPrompt(value) {
+  if (!pendingShareAccessResolve) return;
+  const resolver = pendingShareAccessResolve;
+  pendingShareAccessResolve = null;
+  resolver(value);
+}
+
+function promptCategoryShareAccess() {
+  if (!shareAccessDialog || !shareAccessForm) {
+    return Promise.resolve(SHARE_ACCESS_EDIT);
+  }
+  if (pendingShareAccessResolve) {
+    resolveShareAccessPrompt(null);
+  }
+  clearShareAccessDialogSelection();
+  setShareAccessDialogError('');
+  if (!shareAccessDialog.open) shareAccessDialog.showModal();
+  const firstOption = shareAccessForm.querySelector('input[name="share-access-level"]');
+  if (firstOption instanceof HTMLElement) {
+    setTimeout(() => firstOption.focus(), 0);
+  }
+  return new Promise((resolve) => {
+    pendingShareAccessResolve = resolve;
+  });
+}
+
+function copyShareLink(link, options = {}) {
   const promptTitle = String(options.promptTitle || 'Copy board link');
-  const statusMessage = String(options.statusMessage || 'Board share link ready to copy.');
-  window.prompt(promptTitle, link);
-  setStatus(statusMessage);
+  const successMessage = String(options.successMessage || 'Link copied to clipboard.');
+  const failureMessage = String(
+    options.failureMessage || 'Could not auto-copy. Use Ctrl/Cmd + C in the opened copy box.'
+  );
+  copyTextToClipboard(link).then((copied) => {
+    if (copied) {
+      showErrorDialog(successMessage, { title: '' });
+      return;
+    }
+    window.prompt(promptTitle, link);
+    showErrorDialog(failureMessage, { title: '' });
+  });
+}
+
+function copyTextToClipboard(value) {
+  const text = String(value || '');
+  if (!text) return Promise.resolve(false);
+  if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).then(
+      () => true,
+      () => copyTextWithExecCommand(text)
+    );
+  }
+  return Promise.resolve(copyTextWithExecCommand(text));
+}
+
+function copyTextWithExecCommand(text) {
+  if (!document.body || typeof document.execCommand !== 'function') return false;
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-9999px';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+  let copied = false;
+  try {
+    copied = document.execCommand('copy');
+  } catch {
+    copied = false;
+  }
+  textarea.remove();
+  return Boolean(copied);
 }
 
 function performBoardRemoval(boardId) {
@@ -4120,6 +4629,7 @@ function performBoardRemoval(boardId) {
   if (index < 0) return;
   const [removed] = data.boards.splice(index, 1);
   if (activeBoardId === boardId) {
+    clearSharedCategoryScope();
     activeBoardId = null;
   }
   saveData();
@@ -4237,6 +4747,10 @@ function openNewBoardDialog(mode = 'board') {
     requestBoardCreation();
     return;
   }
+  if ((mode || 'board') === 'category') {
+    const board = getActiveBoard();
+    if (!ensureSharedBoardEditAccess('add categories', board)) return;
+  }
   createDialogMode = mode === 'category' ? 'category' : 'board';
   if (createDialogMode !== 'category') pendingCategoryParentId = null;
   newBoardTitle.textContent = createDialogMode === 'board' ? 'New Board Name' : 'New Category Name';
@@ -4279,6 +4793,7 @@ function commitNewBoardDialog() {
   } else {
     const board = getActiveBoard();
     if (!board) return;
+    if (!ensureSharedBoardEditAccess('add categories', board)) return;
     const parent = pendingCategoryParentId ? getCategoryNodeById(board, pendingCategoryParentId) : getActiveCategoryNode(board);
     const target = parent ? parent.children : board.categories;
     const categoryId = crypto.randomUUID();
@@ -4297,6 +4812,7 @@ function commitNewBoardDialog() {
   pendingCategoryParentId = null;
   saveData();
   if (createdBoardId) {
+    clearSharedCategoryScope();
     activeBoardId = createdBoardId;
     activeCategoryPath = [];
   }
@@ -4364,6 +4880,7 @@ function findItemLocationInBoard(board, itemId) {
 function moveItemToCategory(itemId, targetCategoryId) {
   const board = getActiveBoard();
   if (!board || !itemId || !targetCategoryId) return;
+  if (!ensureSharedBoardEditAccess('move items between categories', board)) return;
   const targetNode = getCategoryNodeById(board, targetCategoryId);
   if (!targetNode) return;
   const targetCollection = getEditableCollectionForCategoryNode(targetNode);
@@ -4398,6 +4915,7 @@ function getDraggedCategoryId(event) {
 
 function moveCategoryWithinCollection(collection, sourceCategoryId, targetCategoryId, position = 'before') {
   if (!Array.isArray(collection) || !sourceCategoryId || !targetCategoryId || sourceCategoryId === targetCategoryId) return;
+  if (!ensureSharedBoardEditAccess('reorder categories')) return;
   const fromIndex = collection.findIndex((entry) => entry.id === sourceCategoryId);
   const toIndex = collection.findIndex((entry) => entry.id === targetCategoryId);
   if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
@@ -4708,6 +5226,7 @@ function finishCategoryHeaderPointerDrag(pointerId = null, cancel = false) {
 async function startInlineCategoryHeaderEdit(scopeCategoryId = '') {
   const board = getActiveBoard();
   if (!board) return;
+  if (!ensureSharedBoardEditAccess('edit fields', board)) return;
   const scopedId = String(scopeCategoryId || '').trim();
   if (!scopedId) {
     await loadBoardCategoryData(board.id).catch(() => {
@@ -4735,6 +5254,7 @@ function cancelInlineCategoryHeaderEdit() {
 async function saveInlineCategoryHeaderEdit() {
   const board = getActiveBoard();
   if (!board) return;
+  if (!ensureSharedBoardEditAccess('save field changes', board)) return;
   const scopeCategoryId = String(fieldEditorScopeCategoryId || '').trim();
   const scopedOwner = getFieldCategoryOwner(board, scopeCategoryId);
   if (!scopedOwner) {
@@ -4870,6 +5390,7 @@ async function saveInlineCategoryHeaderEdit() {
 
 function deleteCategoryFromHeaderDraft(categoryId) {
   if (!isEditingCategoryHeaders) return;
+  if (!ensureSharedBoardEditAccess('delete fields')) return;
   const category = categoryEditorDraft.find((entry) => entry.id === categoryId);
   if (!category) return;
   if (!category.isDeletable) {
@@ -4886,6 +5407,7 @@ function deleteCategoryFromHeaderDraft(categoryId) {
 
 function openAddCategoryDialog() {
   if (!isEditingCategoryHeaders || !categoryAddDialog || !categoryAddNameInput) return;
+  if (!ensureSharedBoardEditAccess('add fields')) return;
   refreshInputAutocompleteIdentity(categoryAddNameInput, 'new-category-name');
   disableAutofill(categoryAddNameInput);
   if (!categoryAddDialog.open) categoryAddDialog.showModal();
@@ -4902,6 +5424,10 @@ function renderBoardDetail() {
   closeRankMenu();
   const board = getActiveBoard();
   if (!board) return;
+  const canEditContent = canEditSharedBoardContent(board);
+  if (!canEditContent && isEditingCategoryHeaders) {
+    closeEditCategoriesInline();
+  }
 
   // Repair invalid category path if nodes were removed.
   const activeNode = getActiveCategoryNode(board);
@@ -4909,10 +5435,21 @@ function renderBoardDetail() {
     activeCategoryPath = [];
   }
 
-  boardTitle.textContent = board.name;
+  const sharedScope = getActiveSharedCategoryScope(board);
+  const canEditBoardTitle = !sharedScope && canEditSharedBoardContent(board);
+  const titleText = String(sharedScope?.title || board.name || '').trim() || board.name;
+  boardTitle.textContent = titleText;
   boardTitleInput.value = board.name;
   boardTitleWrap.classList.remove('hidden');
   boardTitleInput.classList.add('hidden');
+  boardTitle.classList.toggle('board-title-main-readonly', !canEditBoardTitle);
+  boardTitle.setAttribute('role', canEditBoardTitle ? 'button' : 'heading');
+  boardTitle.setAttribute('tabindex', canEditBoardTitle ? '0' : '-1');
+  if (canEditBoardTitle) {
+    boardTitle.setAttribute('aria-label', 'Edit board name');
+  } else {
+    boardTitle.removeAttribute('aria-label');
+  }
   isEditingBoardTitle = false;
   renderCategoryPanel(board);
   renderAddCategoryOptions(board);
@@ -4920,7 +5457,7 @@ function renderBoardDetail() {
   applyViewMode();
   renderItemsTableHeader(board);
   const items = getCurrentItems(board);
-  addItemPanel.classList.remove('hidden');
+  addItemPanel.classList.toggle('hidden', !canEditContent);
   renderListView(items);
   renderImageView(items);
 }
@@ -4934,6 +5471,7 @@ function renderBoardViewControls() {
 function renderCategoryPanel(board) {
   hideHoverPreview();
   if (!categoryBreadcrumbs || !categoryChildren || !addCategoryBtn) return;
+  const canEditContent = canEditSharedBoardContent(board);
   viewToggleButtons.clear();
   categoryBreadcrumbs.innerHTML = '';
 
@@ -4986,28 +5524,49 @@ function renderCategoryPanel(board) {
     categoryChildren.appendChild(renderCategoryGallery(rootChildren));
   } else if (children.length) {
     const categoryCollection = getCurrentCategoryCollection(board);
+    const sharedScope = getActiveSharedCategoryScope(board);
+    const sharedRootNode = sharedScope
+      ? getCategoryNodeByPath(board, sharedScope.requestedPath)
+      : null;
+    const sharedRootPath = sharedScope
+      ? [...sharedScope.requestedPath]
+      : [];
     const appendCategoryTree = (node, collection, container, depth = 0, parentName = '', pathIds = []) => {
       const rendered = renderCategoryCard(node, collection, depth, parentName, pathIds);
       container.appendChild(rendered.card);
       if (rendered.isExpanded && rendered.childNodes.length && rendered.childHost) {
         for (const sub of rendered.childNodes) {
-          appendCategoryTree(sub, rendered.childNodes, rendered.childHost, depth + 1, node.name || '', [...pathIds, sub.id]);
+          appendCategoryTree(
+            sub,
+            rendered.childCollection || rendered.childNodes,
+            rendered.childHost,
+            depth + 1,
+            node.name || '',
+            [...pathIds, sub.id]
+          );
         }
       }
     };
     for (const child of children) {
-      appendCategoryTree(child, categoryCollection, categoryChildren, 0, '', [child.id]);
+      const childPath = (!activeCategoryPath.length && sharedRootNode && child?.id === sharedRootNode.id && sharedRootPath.length)
+        ? sharedRootPath
+        : [child.id];
+      appendCategoryTree(child, categoryCollection, categoryChildren, 0, '', childPath);
     }
   }
 
   if (categoryPanel) categoryPanel.classList.toggle('hidden', children.length === 0);
   addCategoryBtn.textContent = activeCategoryPath.length ? 'Add Subcategory' : 'Add Category';
+  addCategoryBtn.classList.toggle('hidden', !canEditContent);
+  addCategoryBtn.disabled = !canEditContent;
 }
 
 function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentName = '', pathIds = []) {
   const card = document.createElement('article');
   card.className = `category-card ${depth === 0 ? 'category-card-root' : 'category-card-sub'}`;
   card.dataset.categoryId = categoryNode.id;
+  const board = getActiveBoard();
+  const canEditContent = canEditSharedBoardContent(board);
   const categoryPathIds = Array.isArray(pathIds) && pathIds.length ? [...pathIds] : [categoryNode.id];
   const head = document.createElement('div');
   head.className = 'category-card-head';
@@ -5016,7 +5575,9 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
     ? childNodes[0]
     : null;
   const hasSubcategories = childNodes.length > 0 && !allItemsProxyNode;
-  const renderedChildNodes = hasSubcategories ? childNodes : [];
+  const renderedChildNodes = hasSubcategories
+    ? getSharedScopeVisibleChildren(board, categoryPathIds, childNodes)
+    : [];
   const toggleExpanded = () => {
     const isFocusedImageRoot = activeView === 'image'
       && activeCategoryPath.length === 0
@@ -5045,8 +5606,12 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
     if (event.target && event.target.closest('button,input,textarea,a')) return;
     toggleExpanded();
   });
-  head.setAttribute('draggable', 'true');
+  head.setAttribute('draggable', canEditContent ? 'true' : 'false');
   head.addEventListener('dragstart', (event) => {
+    if (!canEditContent) {
+      event.preventDefault();
+      return;
+    }
     if (event.target && event.target.closest('button,input,textarea,a')) {
       event.preventDefault();
       return;
@@ -5069,6 +5634,7 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
   });
 
   card.addEventListener('dragover', (event) => {
+    if (!canEditContent) return;
     const nearestCard = event.target instanceof Element ? event.target.closest('.category-card') : null;
     if (nearestCard && nearestCard !== card) return;
     const draggedCategoryId = getDraggedCategoryId(event);
@@ -5094,6 +5660,7 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
     card.classList.remove('category-reorder-over', 'category-reorder-above', 'category-reorder-below');
   });
   card.addEventListener('drop', (event) => {
+    if (!canEditContent) return;
     const nearestCard = event.target instanceof Element ? event.target.closest('.category-card') : null;
     if (nearestCard && nearestCard !== card) return;
     const draggedCategoryId = getDraggedCategoryId(event);
@@ -5130,8 +5697,8 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
   titleBtn.type = 'button';
   titleBtn.className = 'category-card-title-btn';
   titleBtn.textContent = categoryNode.name;
-  titleBtn.setAttribute('aria-label', `Rename ${categoryNode.name || 'category'}`);
-  titleBtn.title = 'Click to rename category';
+  titleBtn.setAttribute('aria-label', canEditContent ? `Rename ${categoryNode.name || 'category'}` : `Open ${categoryNode.name || 'category'}`);
+  titleBtn.title = canEditContent ? 'Click to rename category' : 'Open category';
   const editCategoryTitle = () => {
     startInlineEdit({
       container: titleBtn,
@@ -5145,6 +5712,10 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
   };
   titleBtn.addEventListener('click', (event) => {
     event.stopPropagation();
+    if (!canEditContent) {
+      toggleExpanded();
+      return;
+    }
     editCategoryTitle();
   });
   const previewImages = getCategoryPreviewImages(categoryNode, 5);
@@ -5186,6 +5757,7 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
   addSubBtn.textContent = 'Add Subcategory';
   addSubBtn.addEventListener('click', (event) => {
     event.stopPropagation();
+    if (!ensureSharedBoardEditAccess('add subcategories', board)) return;
     pendingCategoryParentId = categoryNode.id;
     openNewBoardDialog('category');
   });
@@ -5239,6 +5811,7 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
   };
 
   const handleDeleteCategory = async () => {
+    if (!ensureSharedBoardEditAccess('delete categories', board)) return;
     toggleMenu(false);
     const itemCount = collectAllItemsFromCategory(categoryNode).length;
     if (itemCount > 0) {
@@ -5269,36 +5842,20 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
     handleDeleteCategory();
   });
 
-  const shareActionBtn = document.createElement('button');
-  shareActionBtn.type = 'button';
-  shareActionBtn.className = 'category-card-delete-action';
-  const shareIcon = document.createElement('span');
-  shareIcon.className = 'category-card-menu-icon';
-  shareIcon.setAttribute('aria-hidden', 'true');
-  shareIcon.textContent = '↗';
-  const shareText = document.createElement('span');
-  shareText.textContent = depth > 0 ? 'Share Subcategory' : 'Share category';
-  shareActionBtn.appendChild(shareIcon);
-  shareActionBtn.appendChild(shareText);
-  shareActionBtn.addEventListener('click', (event) => {
-    event.stopPropagation();
-    toggleMenu(false);
-    copyCategoryShareLink(getActiveBoard(), categoryPathIds);
-  });
-
   const manualEntryActionBtn = document.createElement('button');
   manualEntryActionBtn.type = 'button';
   manualEntryActionBtn.className = 'category-card-delete-action';
   const manualEntryIcon = document.createElement('span');
   manualEntryIcon.className = 'category-card-menu-icon';
   manualEntryIcon.setAttribute('aria-hidden', 'true');
-  manualEntryIcon.textContent = '✎';
+  manualEntryIcon.textContent = '+';
   const manualEntryText = document.createElement('span');
   manualEntryText.textContent = 'Manual Entry';
   manualEntryActionBtn.appendChild(manualEntryIcon);
   manualEntryActionBtn.appendChild(manualEntryText);
   manualEntryActionBtn.addEventListener('click', (event) => {
     event.stopPropagation();
+    if (!ensureSharedBoardEditAccess('add manual entries', board)) return;
     toggleMenu(false);
     const collection = getEditableCollectionForCategoryNode(categoryNode);
     if (!Array.isArray(collection)) return;
@@ -5316,18 +5873,39 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
     }, 0);
   });
 
+  const shareActionBtn = document.createElement('button');
+  shareActionBtn.type = 'button';
+  shareActionBtn.className = 'category-card-delete-action';
+  const shareIcon = document.createElement('span');
+  shareIcon.className = 'category-card-menu-icon';
+  shareIcon.setAttribute('aria-hidden', 'true');
+  shareIcon.textContent = '↗';
+  const shareText = document.createElement('span');
+  shareText.textContent = depth > 0 ? 'Share Subcategory' : 'Share category';
+  shareActionBtn.appendChild(shareIcon);
+  shareActionBtn.appendChild(shareText);
+  shareActionBtn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleMenu(false);
+    void copyCategoryShareLink(getActiveBoard(), categoryPathIds);
+  });
+
   menuToggleBtn.addEventListener('click', (event) => {
     event.stopPropagation();
     toggleMenu(moreMenu.hidden);
   });
 
+  if (canEditContent) {
+    moreMenu.appendChild(manualEntryActionBtn);
+  }
   moreMenu.appendChild(shareActionBtn);
-  moreMenu.appendChild(manualEntryActionBtn);
-  moreMenu.appendChild(deleteActionBtn);
+  if (canEditContent) {
+    moreMenu.appendChild(deleteActionBtn);
+  }
   moreWrapper.appendChild(menuToggleBtn);
   moreWrapper.appendChild(moreMenu);
 
-  if (canAddSubcategory) controlsRow.appendChild(addSubBtn);
+  if (canAddSubcategory && canEditContent) controlsRow.appendChild(addSubBtn);
   controlsRow.appendChild(moreWrapper);
   controlsRow.appendChild(arrowBtn);
   controls.appendChild(controlsRow);
@@ -5350,9 +5928,11 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
     previewTitle.className = 'category-item-preview-title';
     previewTitle.textContent = 'Items';
     previewWrap.appendChild(previewTitle);
-    if (activeView === 'image') {
+    if (canEditContent && activeView === 'image') {
       previewWrap.appendChild(buildCategoryItemsImageGrid(previewItems, editableCollection));
     } else {
+      // Use the interactive table renderer so feedback-only links can add/edit/delete feedback.
+      // Non-feedback edits remain blocked by access guards in the edit handlers.
       previewWrap.appendChild(buildCategoryItemsTable(previewItems, editableCollection, categoryNode));
     }
     body.appendChild(previewWrap);
@@ -5366,6 +5946,7 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
   return {
     card,
     childNodes: renderedChildNodes,
+    childCollection: childNodes,
     childHost: nestedChildren,
     isExpanded
   };
@@ -5428,6 +6009,7 @@ function renderAddCategoryOptions(board) {
 function handleManualEntryFromAddDropdown() {
   const board = getActiveBoard();
   if (!board) return;
+  if (!ensureSharedBoardEditAccess('add manual entries', board)) return;
   const activeNode = getActiveCategoryNode(board);
   const collection = activeNode
     ? getEditableCollectionForCategoryNode(activeNode)
@@ -5458,9 +6040,10 @@ function buildCategoryItemsTable(items, itemCollection, categoryNode = null) {
   const table = document.createElement('table');
   table.className = 'category-item-table';
   const board = getActiveBoard();
+  const canEditContent = canEditSharedBoardContent(board);
   const scopeCategoryId = getFieldContextCategoryId(board, { categoryNode });
   const categories = getRenderableFieldCategories(board, { scopeCategoryId });
-  const showFieldEditControls = isEditingFieldScope(scopeCategoryId);
+  const showFieldEditControls = canEditContent && isEditingFieldScope(scopeCategoryId);
 
   if (showFieldEditControls) {
     const fieldEditControls = document.createElement('div');
@@ -5492,7 +6075,7 @@ function buildCategoryItemsTable(items, itemCollection, categoryNode = null) {
   renderTableHeadForCategories(table, categories, {
     withEditButton: true,
     editMode: isEditingFieldScope(scopeCategoryId),
-    allowFieldEditorTrigger: true,
+    allowFieldEditorTrigger: canEditContent,
     fieldScopeCategoryId: scopeCategoryId
   });
   table.appendChild(document.createElement('tbody'));
@@ -5520,7 +6103,7 @@ function buildCategoryItemsReadOnlyTable(items, categoryNode = null) {
   const board = getActiveBoard();
   const scopeCategoryId = getFieldContextCategoryId(board, { categoryNode });
   const categories = getRenderableFieldCategories(board, { scopeCategoryId });
-  const showFieldEditControls = isEditingFieldScope(scopeCategoryId);
+  const showFieldEditControls = false;
 
   if (showFieldEditControls) {
     const fieldEditControls = document.createElement('div');
@@ -5552,7 +6135,7 @@ function buildCategoryItemsReadOnlyTable(items, categoryNode = null) {
   renderTableHeadForCategories(table, categories, {
     withEditButton: true,
     editMode: isEditingFieldScope(scopeCategoryId),
-    allowFieldEditorTrigger: true,
+    allowFieldEditorTrigger: false,
     fieldScopeCategoryId: scopeCategoryId
   });
   table.appendChild(document.createElement('tbody'));
@@ -5599,28 +6182,8 @@ function buildCategoryItemsReadOnlyTable(items, categoryNode = null) {
       }
       tr.classList.add('item-row');
       applyFavoriteRankClass(tr, item);
-      tr.setAttribute('draggable', 'true');
+      tr.setAttribute('draggable', 'false');
       tr.dataset.itemId = item.id;
-      tr.addEventListener('dragstart', (event) => {
-        if (event.target && event.target.closest('button,a,input,textarea')) {
-          event.preventDefault();
-          return;
-        }
-        draggingItemId = item.id;
-        draggingCategoryItemId = item.id;
-        tr.classList.add('is-dragging');
-        if (event.dataTransfer) {
-          event.dataTransfer.effectAllowed = 'move';
-          event.dataTransfer.setData('text/plain', item.id);
-          event.dataTransfer.setData('application/x-item-id', item.id);
-        }
-      });
-      tr.addEventListener('dragend', () => {
-        draggingItemId = null;
-        draggingCategoryItemId = null;
-        tr.classList.remove('is-dragging');
-        clearDragStyles();
-      });
       tr.addEventListener('click', (event) => {
         if (event.target && event.target.closest('a,button,input,textarea')) return;
         openDetailModal(item.id);
@@ -5646,6 +6209,8 @@ function buildCategoryItemsReadOnlyTable(items, categoryNode = null) {
 function startBoardTitleEdit() {
   const board = getActiveBoard();
   if (!board) return;
+  if (getActiveSharedCategoryScope(board)) return;
+  if (!ensureSharedBoardEditAccess('edit board name', board)) return;
   isEditingBoardTitle = true;
   boardTitleInput.value = board.name;
   boardTitleWrap.classList.add('hidden');
@@ -5657,6 +6222,7 @@ function startBoardTitleEdit() {
 function commitBoardTitleEdit() {
   const board = getActiveBoard();
   if (!board) return;
+  if (!ensureSharedBoardEditAccess('edit board name', board)) return;
   const nextName = boardTitleInput.value.trim();
   if (nextName) board.name = nextName;
   saveData();
@@ -5670,6 +6236,11 @@ function cancelBoardTitleEdit() {
 function renderListView(items) {
   body.innerHTML = '';
   const board = getActiveBoard();
+  const sharedScope = board ? getActiveSharedCategoryScope(board) : null;
+  if (sharedScope) {
+    listViewSection.classList.add('hidden');
+    return;
+  }
   const scopeCategoryId = getFieldContextCategoryId(board, { useActive: true });
   const categories = getRenderableFieldCategories(board, { scopeCategoryId });
   const columnCount = Math.max(1, categories.length);
@@ -5704,6 +6275,9 @@ function renderItemRows(targetBody, items, options = {}) {
   const moveItemBeforeFn = typeof options.moveItemBeforeFn === 'function' ? options.moveItemBeforeFn : moveItemBefore;
   const removeItemFn = typeof options.removeItemFn === 'function' ? options.removeItemFn : removeItem;
   const board = getActiveBoard();
+  const canEditContent = canEditSharedBoardContent(board);
+  const canEditFeedback = canManageFeedbackInSharedScope(board);
+  const canShowRankAction = canEditContent || canEditFeedback;
   const categories = Array.isArray(options.fieldCategories) && options.fieldCategories.length
     ? options.fieldCategories
     : getRenderableFieldCategories(board);
@@ -5711,10 +6285,14 @@ function renderItemRows(targetBody, items, options = {}) {
     const row = document.createElement('tr');
     row.classList.add('item-row');
     applyFavoriteRankClass(row, item);
-    row.setAttribute('draggable', 'true');
+    row.setAttribute('draggable', canEditContent ? 'true' : 'false');
     row.dataset.itemId = item.id;
 
     row.addEventListener('dragstart', (event) => {
+      if (!canEditContent) {
+        event.preventDefault();
+        return;
+      }
       if (event.target && event.target.closest('button,a,input,textarea')) {
         event.preventDefault();
         return;
@@ -5730,6 +6308,7 @@ function renderItemRows(targetBody, items, options = {}) {
     });
 
     row.addEventListener('dragover', (event) => {
+      if (!canEditContent) return;
       const canReorderInPlace = draggingItemId && collectionHasItem(items, draggingItemId);
       if (canReorderInPlace && draggingItemId !== item.id) {
         event.preventDefault();
@@ -5745,6 +6324,7 @@ function renderItemRows(targetBody, items, options = {}) {
     });
 
     row.addEventListener('drop', (event) => {
+      if (!canEditContent) return;
       const canReorderInPlace = draggingItemId && collectionHasItem(items, draggingItemId);
       if (!canReorderInPlace || !draggingItemId || draggingItemId === item.id) return;
       event.preventDefault();
@@ -5770,6 +6350,13 @@ function renderItemRows(targetBody, items, options = {}) {
 
     if (feedbackCell) {
       const rowActions = buildRowActions();
+      if (!canEditContent) {
+        rowActions.querySelector('.row-remove-btn')?.classList.add('hidden');
+      }
+      if (!canEditFeedback) {
+        const feedbackAddBtn = feedbackCell.querySelector('.feedback-add-btn');
+        if (feedbackAddBtn) feedbackAddBtn.classList.add('hidden');
+      }
       feedbackCell.appendChild(rowActions);
     }
 
@@ -5777,6 +6364,7 @@ function renderItemRows(targetBody, items, options = {}) {
     const rowOpenBtn = row.querySelector('.row-open-btn');
     const rowRemoveBtn = row.querySelector('.row-remove-btn');
     if (rowRankBtn) {
+      rowRankBtn.classList.toggle('hidden', !canShowRankAction);
       rowRankBtn.classList.toggle('active', Boolean(getItemFavoriteRank(item)));
       rowRankBtn.addEventListener('click', (event) => {
         event.stopPropagation();
@@ -5789,7 +6377,10 @@ function renderItemRows(targetBody, items, options = {}) {
         if (item.url) window.open(item.url, '_blank', 'noopener,noreferrer');
       });
     }
-    if (rowRemoveBtn) rowRemoveBtn.addEventListener('click', () => removeItemFn(item.id));
+    if (rowRemoveBtn) {
+      rowRemoveBtn.classList.toggle('hidden', !canEditContent);
+      rowRemoveBtn.addEventListener('click', () => removeItemFn(item.id));
+    }
     row.addEventListener('click', (event) => {
       if (event.target && event.target.closest('button,a,input,textarea')) return;
       openDetailModal(item.id);
@@ -5798,7 +6389,9 @@ function renderItemRows(targetBody, items, options = {}) {
     targetBody.appendChild(row);
   }
 
-  wireTableBodyDropToEnd(targetBody, items, moveItemBeforeFn);
+  if (canEditContent) {
+    wireTableBodyDropToEnd(targetBody, items, moveItemBeforeFn);
+  }
 }
 
 function buildRowActions() {
@@ -5814,6 +6407,8 @@ function buildRowActions() {
 }
 
 function buildItemCellForCategory(row, item, category, board) {
+  const canEditContent = canEditSharedBoardContent(board);
+  const editableTokenClass = canEditContent ? 'editable-token' : 'editable-token is-readonly';
   if (category.slug === 'image') {
     const cell = document.createElement('td');
     cell.className = 'image-cell';
@@ -5829,7 +6424,7 @@ function buildItemCellForCategory(row, item, category, board) {
       image.loading = 'lazy';
       stack.appendChild(image);
     }
-    if (item?.manualEntry && !displayImage) {
+    if (canEditContent && item?.manualEntry && !displayImage) {
       const uploadBtn = document.createElement('button');
       uploadBtn.type = 'button';
       uploadBtn.className = 'image-upload-btn';
@@ -5859,9 +6454,9 @@ function buildItemCellForCategory(row, item, category, board) {
   if (category.slug === 'item_name') {
     const cell = document.createElement('td');
     cell.className = 'name-cell';
-    cell.innerHTML = `<span class="item-link editable-token">${escapeHtml(item.name)}</span>`;
+    cell.innerHTML = `<span class="item-link ${editableTokenClass}">${escapeHtml(item.name)}</span>`;
     const token = cell.querySelector('.editable-token');
-    if (token) token.addEventListener('click', (event) => {
+    if (token && canEditContent) token.addEventListener('click', (event) => {
       event.stopPropagation();
       startInlineEdit({
         container: token,
@@ -5882,9 +6477,9 @@ function buildItemCellForCategory(row, item, category, board) {
   if (category.slug === 'seller') {
     const cell = document.createElement('td');
     cell.className = 'seller-cell';
-    cell.innerHTML = `<span class="editable-token">${escapeHtml(item.seller || 'Unknown')}</span>`;
+    cell.innerHTML = `<span class="${editableTokenClass}">${escapeHtml(item.seller || 'Unknown')}</span>`;
     const token = cell.querySelector('.editable-token');
-    if (token) token.addEventListener('click', (event) => {
+    if (token && canEditContent) token.addEventListener('click', (event) => {
       event.stopPropagation();
       startInlineEdit({
         container: token,
@@ -5902,9 +6497,9 @@ function buildItemCellForCategory(row, item, category, board) {
   if (category.slug === 'price') {
     const cell = document.createElement('td');
     cell.className = 'price-cell';
-    cell.innerHTML = `<span class="editable-token">${escapeHtml(formatPrice(item.price) || 'N/A')}</span>`;
+    cell.innerHTML = `<span class="${editableTokenClass}">${escapeHtml(formatPrice(item.price) || 'N/A')}</span>`;
     const token = cell.querySelector('.editable-token');
-    if (token) token.addEventListener('click', (event) => {
+    if (token && canEditContent) token.addEventListener('click', (event) => {
       event.stopPropagation();
       startInlineEdit({
         container: token,
@@ -5923,7 +6518,7 @@ function buildItemCellForCategory(row, item, category, board) {
     const cell = document.createElement('td');
     cell.className = 'highlights-cell';
     const highlightsList = document.createElement('ul');
-    highlightsList.className = 'table-highlights editable-token';
+    highlightsList.className = `table-highlights ${editableTokenClass}`;
     const highlights = normalizeHighlights(item.highlights);
     if (!highlights.length) {
       const li = document.createElement('li');
@@ -5937,7 +6532,7 @@ function buildItemCellForCategory(row, item, category, board) {
         highlightsList.appendChild(li);
       }
     }
-    highlightsList.addEventListener('click', (event) => {
+    if (canEditContent) highlightsList.addEventListener('click', (event) => {
       if (event.target && event.target.closest('button')) return;
       event.stopPropagation();
       startInlineEdit({
@@ -5970,10 +6565,11 @@ function buildItemCellForCategory(row, item, category, board) {
 }
 
 function buildCustomFieldCell(board, item, category) {
+  const canEditContent = canEditSharedBoardContent(board);
   const cell = document.createElement('td');
   cell.className = 'custom-field-cell';
   const token = document.createElement('span');
-  token.className = 'editable-token';
+  token.className = canEditContent ? 'editable-token' : 'editable-token is-readonly';
   const entry = item?.customFieldValues?.[category.id] || null;
   const display = formatCustomFieldValue(category, entry);
   if (display) {
@@ -5983,10 +6579,12 @@ function buildCustomFieldCell(board, item, category) {
     token.classList.add('custom-field-empty');
     cell.classList.add('custom-field-empty');
   }
-  token.addEventListener('click', (event) => {
-    event.stopPropagation();
-    startCustomFieldEdit({ board, item, category, container: token });
-  });
+  if (canEditContent) {
+    token.addEventListener('click', (event) => {
+      event.stopPropagation();
+      startCustomFieldEdit({ board, item, category, container: token });
+    });
+  }
   cell.appendChild(token);
   return cell;
 }
@@ -6005,6 +6603,7 @@ function focusItemNameInlineEditor(itemId) {
 
 function startCustomFieldEdit({ board, item, category, container }) {
   if (!container || container.dataset.editing === 'true') return;
+  if (!ensureSharedBoardEditAccess('edit item fields', board)) return;
   if (category.type === 'boolean' || category.type === 'select') {
     startCustomSelectEdit({ board, item, category, container });
     return;
@@ -6030,6 +6629,7 @@ function startCustomFieldEdit({ board, item, category, container }) {
 }
 
 function startCustomSelectEdit({ board, item, category, container }) {
+  if (!ensureSharedBoardEditAccess('edit item fields', board)) return;
   container.dataset.editing = 'true';
   const current = item?.customFieldValues?.[category.id];
   const currentValue = current?.value;
@@ -6149,7 +6749,9 @@ function renderHoverPreview() {
   hoverPreviewImage.src = hoverPreviewImages[hoverPreviewIndex];
   const item = getHoverPreviewItem();
   const currentSrc = hoverPreviewImages[hoverPreviewIndex] || '';
+  const canEditContent = canEditSharedBoardContent(getActiveBoard());
   if (hoverPreviewStar) {
+    hoverPreviewStar.classList.toggle('hidden', !canEditContent);
     const isMain = item
       ? canonicalImageKey(item.image || hoverPreviewImages[0]) === canonicalImageKey(currentSrc)
       : false;
@@ -6157,8 +6759,12 @@ function renderHoverPreview() {
     hoverPreviewStar.title = isMain ? 'Cover image' : 'Set as cover image';
   }
   if (hoverPreviewDelete) {
+    hoverPreviewDelete.classList.toggle('hidden', !canEditContent);
     hoverPreviewDelete.title = 'Delete image';
     hoverPreviewDelete.setAttribute('aria-label', 'Delete image');
+  }
+  if (hoverPreviewAddBtn) {
+    hoverPreviewAddBtn.classList.toggle('hidden', !canEditContent);
   }
   if (!hoverPreviewThumbs) return;
   hoverPreviewThumbs.innerHTML = '';
@@ -6185,6 +6791,7 @@ function getHoverPreviewItem() {
 }
 
 function setCoverFromHoverPreview() {
+  if (!ensureSharedBoardEditAccess('update images')) return;
   const item = getHoverPreviewItem();
   if (!item || !hoverPreviewImages.length) return;
   const src = hoverPreviewImages[hoverPreviewIndex];
@@ -6199,6 +6806,7 @@ function setCoverFromHoverPreview() {
 }
 
 function removeCurrentHoverPreviewImage() {
+  if (!ensureSharedBoardEditAccess('delete images')) return;
   const item = getHoverPreviewItem();
   if (!item || !hoverPreviewImages.length) return;
   const safeIndex = Math.max(0, Math.min(hoverPreviewIndex, hoverPreviewImages.length - 1));
@@ -6234,6 +6842,7 @@ function openAddImageDialogForItem(itemId) {
   if (!hoverAddDialog) return;
   const board = getActiveBoard();
   if (!board || itemId == null) return;
+  if (!ensureSharedBoardEditAccess('add images', board)) return;
   const item = findItemInBoard(board, itemId);
   if (!item) return;
   activeAddImageItemId = itemId;
@@ -6292,6 +6901,7 @@ function syncImageViewsAfterItemImageAdd(item, addedSrc) {
 }
 
 function addImageUrlFromHoverPreview(overrideUrl = '') {
+  if (!ensureSharedBoardEditAccess('add images')) return;
   const item = getAddImageDialogItem();
   const url = String(overrideUrl || hoverAddUrl?.value || '').trim();
   if (!item || !url) return;
@@ -6303,6 +6913,7 @@ function addImageUrlFromHoverPreview(overrideUrl = '') {
 }
 
 function addUploadedImageFromHoverPreview(fileOverride = null) {
+  if (!ensureSharedBoardEditAccess('add images')) return;
   const item = getAddImageDialogItem();
   if (!item) return;
   const file = fileOverride || hoverAddUploadInput?.files?.[0] || null;
@@ -6427,13 +7038,21 @@ function buildImageItemCard(item, options = {}) {
     ? options.removeItemFn
     : removeItem;
   const collectionItems = Array.isArray(options.collectionItems) ? options.collectionItems : null;
+  const board = getActiveBoard();
+  const canEditContent = canEditSharedBoardContent(board);
+  const canEditFeedback = canManageFeedbackInSharedScope(board);
+  const canShowRankAction = canEditContent || canEditFeedback;
 
   const card = cardTemplate.content.firstElementChild.cloneNode(true);
   applyFavoriteRankClass(card, item);
-  card.setAttribute('draggable', 'true');
+  card.setAttribute('draggable', canEditContent ? 'true' : 'false');
   card.dataset.itemId = item.id;
 
   card.addEventListener('dragstart', (event) => {
+    if (!canEditContent) {
+      event.preventDefault();
+      return;
+    }
     if (event.target && event.target.closest('button,a,input,textarea')) {
       event.preventDefault();
       return;
@@ -6449,6 +7068,7 @@ function buildImageItemCard(item, options = {}) {
   });
 
   card.addEventListener('dragover', (event) => {
+    if (!canEditContent) return;
     const canReorderInPlace = draggingItemId && (!collectionItems || collectionHasItem(collectionItems, draggingItemId));
     if (canReorderInPlace && draggingItemId !== item.id) {
       event.preventDefault();
@@ -6464,6 +7084,7 @@ function buildImageItemCard(item, options = {}) {
   });
 
   card.addEventListener('drop', (event) => {
+    if (!canEditContent) return;
     const canReorderInPlace = draggingItemId && (!collectionItems || collectionHasItem(collectionItems, draggingItemId));
     if (!canReorderInPlace) return;
     event.preventDefault();
@@ -6503,28 +7124,30 @@ function buildImageItemCard(item, options = {}) {
   if (titleEl) {
     titleEl.href = item.url;
     titleEl.textContent = item.name || 'Untitled item';
-    titleEl.classList.add('editable-token');
-    titleEl.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      startInlineEdit({
-        container: titleEl,
-        initialValue: item.name || '',
-        type: 'text',
-        placeholder: 'Item name',
-        onSave: (next) => {
-          item.name = normalizeItemName(next || 'Untitled item', item.url || '', {
-            brand: item.brand || '',
-            seller: item.seller || ''
-          });
-        }
+    titleEl.classList.toggle('editable-token', canEditContent);
+    if (canEditContent) {
+      titleEl.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        startInlineEdit({
+          container: titleEl,
+          initialValue: item.name || '',
+          type: 'text',
+          placeholder: 'Item name',
+          onSave: (next) => {
+            item.name = normalizeItemName(next || 'Untitled item', item.url || '', {
+              brand: item.brand || '',
+              seller: item.seller || ''
+            });
+          }
+        });
       });
-    });
+    }
   }
   if (sellerEl) {
-    sellerEl.innerHTML = `<span class="editable-token">${escapeHtml(item.seller || 'Unknown seller')}</span>`;
+    sellerEl.innerHTML = `<span class="${canEditContent ? 'editable-token' : 'editable-token is-readonly'}">${escapeHtml(item.seller || 'Unknown seller')}</span>`;
     const sellerEditTarget = sellerEl.querySelector('.editable-token');
-    if (sellerEditTarget) sellerEditTarget.addEventListener('click', (event) => {
+    if (sellerEditTarget && canEditContent) sellerEditTarget.addEventListener('click', (event) => {
       event.stopPropagation();
       startInlineEdit({
         container: sellerEditTarget,
@@ -6538,9 +7161,9 @@ function buildImageItemCard(item, options = {}) {
     });
   }
   if (priceEl) {
-    priceEl.innerHTML = `<span class="editable-token">${escapeHtml(formatPrice(item.price) || 'N/A')}</span>`;
+    priceEl.innerHTML = `<span class="${canEditContent ? 'editable-token' : 'editable-token is-readonly'}">${escapeHtml(formatPrice(item.price) || 'N/A')}</span>`;
     const priceEditTarget = priceEl.querySelector('.editable-token');
-    if (priceEditTarget) priceEditTarget.addEventListener('click', (event) => {
+    if (priceEditTarget && canEditContent) priceEditTarget.addEventListener('click', (event) => {
       event.stopPropagation();
       startInlineEdit({
         container: priceEditTarget,
@@ -6614,7 +7237,9 @@ function buildImageItemCard(item, options = {}) {
       event.stopPropagation();
       openFeedbackDialog(item.id);
     });
-    feedbackWrap.appendChild(addBtn);
+    if (canEditFeedback) {
+      feedbackWrap.appendChild(addBtn);
+    }
 
     if (hoverActions) {
       cardBody.insertBefore(feedbackWrap, hoverActions);
@@ -6626,6 +7251,12 @@ function buildImageItemCard(item, options = {}) {
   const cardRankBtn = card.querySelector('.card-rank-btn');
   const cardOpenBtn = card.querySelector('.card-open-btn');
   const cardRemoveBtn = card.querySelector('.card-remove-btn');
+  if (cardRankBtn) {
+    cardRankBtn.classList.toggle('hidden', !canShowRankAction);
+  }
+  if (cardRemoveBtn) {
+    cardRemoveBtn.classList.toggle('hidden', !canEditContent);
+  }
   if (cardRankBtn) {
     cardRankBtn.classList.toggle('active', Boolean(getItemFavoriteRank(item)));
     cardRankBtn.addEventListener('click', (event) => {
@@ -6639,7 +7270,9 @@ function buildImageItemCard(item, options = {}) {
       if (item.url) window.open(item.url, '_blank', 'noopener,noreferrer');
     });
   }
-  if (cardRemoveBtn) cardRemoveBtn.addEventListener('click', () => removeItemFn(item.id));
+  if (cardRemoveBtn) {
+    cardRemoveBtn.addEventListener('click', () => removeItemFn(item.id));
+  }
   card.addEventListener('click', (event) => {
     if (event.target && event.target.closest('button,a,input,textarea')) return;
     openDetailModal(item.id);
@@ -6672,6 +7305,11 @@ function buildCategoryItemsImageGrid(items, itemCollection) {
 function renderImageView(items) {
   cardsGrid.innerHTML = '';
   const board = getActiveBoard();
+  const sharedScope = board ? getActiveSharedCategoryScope(board) : null;
+  if (sharedScope) {
+    imageViewSection.classList.add('hidden');
+    return;
+  }
   const hasSubcategories = board ? getCurrentCategoryChildren(board).length > 0 : false;
   const boardHasNoItems = board ? getAllBoardItems(board).length === 0 : !items.length;
   const shouldShowImageSection = (items.length > 0 || !hasSubcategories) && !boardHasNoItems;
@@ -6821,6 +7459,7 @@ function wireItemGridDropToEnd(grid, items, moveItemBeforeFn) {
 
 function moveItemBeforeInCollection(items, sourceId, targetId, insertAfter = false) {
   if (!Array.isArray(items)) return;
+  if (!ensureSharedBoardEditAccess('reorder items')) return;
   const fromIndex = items.findIndex((entry) => entry.id === sourceId);
   const toIndex = items.findIndex((entry) => entry.id === targetId);
   if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
@@ -6843,7 +7482,9 @@ function clearDragStyles() {
 
 function renderFeedbackCell(cell, item) {
   cell.innerHTML = '';
-  const list = buildFeedbackList(item, { showActions: true, stopPropagation: true });
+  const board = getActiveBoard();
+  const canEditFeedback = canManageFeedbackInSharedScope(board);
+  const list = buildFeedbackList(item, { showActions: canEditFeedback, stopPropagation: true });
 
   const addFeedbackBtn = document.createElement('button');
   addFeedbackBtn.type = 'button';
@@ -6855,12 +7496,15 @@ function renderFeedbackCell(cell, item) {
   });
 
   cell.appendChild(list);
-  cell.appendChild(addFeedbackBtn);
+  if (canEditFeedback) {
+    cell.appendChild(addFeedbackBtn);
+  }
 }
 
 function openFeedbackDialog(itemId, feedbackId = null) {
   const board = getActiveBoard();
   if (!board || !feedbackDialog || !feedbackEmojiGrid) return;
+  if (!ensureSharedFeedbackAccess('add or edit feedback', board)) return;
   const item = findItemInBoard(board, itemId);
   if (!item) return;
   activeFeedbackItemId = item.id;
@@ -6898,6 +7542,7 @@ function openFeedbackDialog(itemId, feedbackId = null) {
 function commitFeedbackDialog() {
   const board = getActiveBoard();
   if (!board || !activeFeedbackItemId || !feedbackInput || !feedbackEmojiGrid || !feedbackDialog) return;
+  if (!ensureSharedFeedbackAccess('save feedback', board)) return;
   const item = findItemInBoard(board, activeFeedbackItemId);
   if (!item) return;
 
@@ -6939,6 +7584,7 @@ function commitFeedbackDialog() {
 function startInlineEdit({ container, initialValue, type = 'text', placeholder = '', onSave, onReady }) {
   if (!container) return;
   if (container.dataset.editing === 'true') return;
+  if (!ensureSharedBoardEditAccess('edit values')) return;
   container.dataset.editing = 'true';
   const field = type === 'textarea' ? document.createElement('textarea') : document.createElement('input');
   if (type !== 'textarea') field.type = 'text';
@@ -6991,6 +7637,7 @@ function startInlineEdit({ container, initialValue, type = 'text', placeholder =
 function openImagePicker(itemId) {
   const board = getActiveBoard();
   if (!board || !imagePickerDialog) return;
+  if (!ensureSharedBoardEditAccess('edit images', board)) return;
   const item = findItemInBoard(board, itemId);
   if (!item) return;
   activeImagePickerItemId = itemId;
@@ -7028,6 +7675,7 @@ function renderImagePicker(item) {
 function setMainImageForActiveItem(src) {
   const board = getActiveBoard();
   if (!board || !activeImagePickerItemId) return;
+  if (!ensureSharedBoardEditAccess('set featured images', board)) return;
   const item = findItemInBoard(board, activeImagePickerItemId);
   if (!item) return;
   const images = pinPrimaryImage([src, ...(item.images || []), item.image || ''], src);
@@ -7041,6 +7689,7 @@ function setMainImageForActiveItem(src) {
 function addImageToPicker() {
   const board = getActiveBoard();
   if (!board || !activeImagePickerItemId || !imagePickerUrl) return;
+  if (!ensureSharedBoardEditAccess('add images', board)) return;
   const item = findItemInBoard(board, activeImagePickerItemId);
   if (!item) return;
   const url = imagePickerUrl.value.trim();
@@ -7091,51 +7740,57 @@ function renderDetailModal(item) {
   renderDetailMeta(item);
   renderDetailFeedback(item);
   resetDetailFeedbackComposer();
+  syncDetailPermissionControls();
 }
 
 function renderDetailHeaderFields(item) {
+  const canEditContent = canEditSharedBoardContent(getActiveBoard());
   if (detailName) {
     detailName.innerHTML = '';
     const nameToken = document.createElement('span');
-    nameToken.className = 'editable-token';
+    nameToken.className = canEditContent ? 'editable-token' : 'editable-token is-readonly';
     nameToken.textContent = String(item.name || 'Untitled item').trim() || 'Untitled item';
-    nameToken.title = 'Click to edit item name';
-    nameToken.addEventListener('click', (event) => {
-      event.stopPropagation();
-      startInlineEdit({
-        container: nameToken,
-        initialValue: item.name || '',
-        placeholder: 'Item name',
-        onSave: (next) => {
-          item.name = normalizeItemName(String(next || '').trim() || 'Untitled item', item.url || '', {
-            brand: item.brand || '',
-            seller: item.seller || ''
-          });
-          renderDetailHeaderFields(item);
-        }
+    if (canEditContent) {
+      nameToken.title = 'Click to edit item name';
+      nameToken.addEventListener('click', (event) => {
+        event.stopPropagation();
+        startInlineEdit({
+          container: nameToken,
+          initialValue: item.name || '',
+          placeholder: 'Item name',
+          onSave: (next) => {
+            item.name = normalizeItemName(String(next || '').trim() || 'Untitled item', item.url || '', {
+              brand: item.brand || '',
+              seller: item.seller || ''
+            });
+            renderDetailHeaderFields(item);
+          }
+        });
       });
-    });
+    }
     detailName.appendChild(nameToken);
   }
 
   if (detailPrice) {
     detailPrice.innerHTML = '';
     const priceToken = document.createElement('span');
-    priceToken.className = 'editable-token';
+    priceToken.className = canEditContent ? 'editable-token' : 'editable-token is-readonly';
     priceToken.textContent = formatPrice(item.price) || 'N/A';
-    priceToken.title = 'Click to edit item price';
-    priceToken.addEventListener('click', (event) => {
-      event.stopPropagation();
-      startInlineEdit({
-        container: priceToken,
-        initialValue: formatPrice(item.price) || '',
-        placeholder: '$0.00',
-        onSave: (next) => {
-          item.price = formatPrice(next || '');
-          renderDetailHeaderFields(item);
-        }
+    if (canEditContent) {
+      priceToken.title = 'Click to edit item price';
+      priceToken.addEventListener('click', (event) => {
+        event.stopPropagation();
+        startInlineEdit({
+          container: priceToken,
+          initialValue: formatPrice(item.price) || '',
+          placeholder: '$0.00',
+          onSave: (next) => {
+            item.price = formatPrice(next || '');
+            renderDetailHeaderFields(item);
+          }
+        });
       });
-    });
+    }
     detailPrice.appendChild(priceToken);
   }
 }
@@ -7269,6 +7924,10 @@ function setDetailMainImage(src) {
 function syncDetailFeaturedButton(src) {
   if (!detailFeaturedBtn) return;
   const board = getActiveBoard();
+  if (!canEditSharedBoardContent(board)) {
+    detailFeaturedBtn.classList.add('hidden');
+    return;
+  }
   const item = board && activeDetailItemId != null ? findItemInBoard(board, activeDetailItemId) : null;
   const currentKey = canonicalImageKey(src);
   const featuredKey = canonicalImageKey(item?.image || '');
@@ -7283,6 +7942,11 @@ function syncDetailFeaturedButton(src) {
 
 function syncDetailDeleteButton(src) {
   if (!detailDeleteBtn) return;
+  const board = getActiveBoard();
+  if (!canEditSharedBoardContent(board)) {
+    detailDeleteBtn.classList.add('hidden');
+    return;
+  }
   const hasImage = Boolean(String(src || '').trim());
   detailDeleteBtn.classList.toggle('hidden', !hasImage);
   detailDeleteBtn.setAttribute('aria-label', 'Delete image');
@@ -7290,12 +7954,14 @@ function syncDetailDeleteButton(src) {
 }
 
 function removeCurrentDetailImage() {
+  if (!ensureSharedBoardEditAccess('delete images')) return;
   removeImageFromDetailByIndex(activeDetailImageIndex);
 }
 
 function setFeaturedImageFromDetail() {
   const board = getActiveBoard();
   if (!board || activeDetailItemId == null) return;
+  if (!ensureSharedBoardEditAccess('set featured images', board)) return;
   const item = findItemInBoard(board, activeDetailItemId);
   if (!item) return;
   const images = getItemImages(item);
@@ -7326,6 +7992,8 @@ function ensureActiveDetailThumbVisible() {
 
 function buildFeedbackList(item, options = {}) {
   const { showActions = true, stopPropagation = true } = options;
+  const board = getActiveBoard();
+  const canEditFeedback = canManageFeedbackInSharedScope(board);
   const list = document.createElement('div');
   list.className = 'feedback-list';
   const feedbacks = normalizeFeedbacks(item.feedbacks || []);
@@ -7361,7 +8029,7 @@ function buildFeedbackList(item, options = {}) {
     row.appendChild(badge);
     row.appendChild(textWrap);
 
-    if (showActions) {
+    if (showActions && canEditFeedback) {
       const actions = document.createElement('div');
       actions.className = 'feedback-actions';
       actions.innerHTML = `
@@ -7379,6 +8047,7 @@ function buildFeedbackList(item, options = {}) {
       if (deleteBtn) {
         deleteBtn.addEventListener('click', (event) => {
           if (stopPropagation) event.stopPropagation();
+          if (!ensureSharedFeedbackAccess('delete feedback', board)) return;
           const next = normalizeFeedbacks(item.feedbacks || []).filter((entry) => entry.id !== fb.id);
           item.feedbacks = next;
           saveData();
@@ -7400,7 +8069,18 @@ function renderDetailFeedback(item) {
   detailFeedbackList.innerHTML = '';
   const feedbacks = normalizeFeedbacks(item?.feedbacks || []);
   if (!feedbacks.length) return;
-  detailFeedbackList.appendChild(buildFeedbackList(item, { showActions: true, stopPropagation: false }));
+  detailFeedbackList.appendChild(buildFeedbackList(item, {
+    showActions: canManageFeedbackInSharedScope(getActiveBoard()),
+    stopPropagation: false
+  }));
+}
+
+function syncDetailPermissionControls() {
+  const board = getActiveBoard();
+  const canEditContent = canEditSharedBoardContent(board);
+  const canEditFeedback = canManageFeedbackInSharedScope(board);
+  if (detailAddImageBtn) detailAddImageBtn.classList.toggle('hidden', !canEditContent);
+  if (detailFeedbackComposer) detailFeedbackComposer.classList.toggle('hidden', !canEditFeedback);
 }
 
 function renderDetailFeedbackComposer() {
@@ -7444,6 +8124,7 @@ function collectDetailFeedbackEmojis() {
 function commitDetailFeedback() {
   const board = getActiveBoard();
   if (!board || activeDetailItemId == null) return;
+  if (!ensureSharedFeedbackAccess('save feedback', board)) return;
   const item = findItemInBoard(board, activeDetailItemId);
   if (!item || !detailFeedbackComposerInput) return;
 
@@ -7594,6 +8275,7 @@ function removeItem(itemId) {
 
 function removeItemFromCollection(items, itemId) {
   if (!Array.isArray(items)) return;
+  if (!ensureSharedBoardEditAccess('remove items')) return;
   const next = items.filter((entry) => entry.id !== itemId);
   items.length = 0;
   items.push(...next);
@@ -7607,9 +8289,15 @@ function closeErrorDialog() {
 
 function showErrorDialog(message, options = {}) {
   const text = String(message || '').trim();
-  const title = String(options?.title || 'Notice').trim() || 'Notice';
+  const hasTitleOption = Object.prototype.hasOwnProperty.call(options || {}, 'title');
+  const title = hasTitleOption
+    ? String(options?.title || '').trim()
+    : 'Notice';
   if (!text || !errorDialog || !errorDialogMessage) return false;
-  if (errorDialogTitle) errorDialogTitle.textContent = title;
+  if (errorDialogTitle) {
+    errorDialogTitle.textContent = title;
+    errorDialogTitle.hidden = !title;
+  }
   errorDialogMessage.textContent = text;
   if (!errorDialog.open) errorDialog.showModal();
   return true;

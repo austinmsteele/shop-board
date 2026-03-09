@@ -57,6 +57,9 @@
         <section class="board-topbar">
           <div class="board-toolbar-row">
             <button id="back-home-btn" class="ghost-btn" type="button">Back To Boards</button>
+            <div id="board-auth-bar" class="board-toolbar-right">
+              <button id="board-auth-btn" class="home-auth-btn" type="button">Sign Up / Log In</button>
+            </div>
           </div>
         </section>
 
@@ -228,6 +231,26 @@
           <button id="board-edit-cancel-btn" type="button" class="ghost-btn">Cancel</button>
           <button type="submit">Save</button>
         </menu>
+      </form>
+    </dialog>
+
+    <dialog id="board-edit-add-dialog" class="new-board-dialog board-edit-add-dialog">
+      <form id="board-edit-add-form" method="dialog" class="new-board-form board-edit-add-form" autocomplete="off">
+        <button id="board-edit-add-close-btn" type="button" class="hover-add-close-btn" aria-label="Close add image dialog">×</button>
+        <h2>Add Image</h2>
+        <label>
+          Image URL
+          <input id="board-edit-add-url" type="url" placeholder="Paste image URL..." autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="url" data-lpignore="true" data-1p-ignore="true" />
+        </label>
+        <div id="board-edit-add-drop-zone" class="hover-add-drop-zone board-edit-add-drop-zone" role="button" tabindex="0" aria-label="Drop an image here or click to upload">
+          <p>Drag and drop an image here</p>
+          <p class="hover-add-drop-zone-hint">or click to upload from your computer</p>
+        </div>
+        <menu>
+          <button id="board-edit-add-upload-btn" type="button" class="cancel-btn">Upload</button>
+          <button id="board-edit-add-url-btn" type="submit">Add URL</button>
+        </menu>
+        <input id="board-edit-add-upload-input" type="file" accept="image/*" class="hidden" />
       </form>
     </dialog>
 
@@ -430,6 +453,31 @@
         <menu>
           <button id="board-delete-no-btn" type="button" class="cancel-btn">No</button>
           <button id="board-delete-yes-btn" type="submit">Yes</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="share-access-dialog" class="new-board-dialog">
+      <form id="share-access-form" method="dialog" class="new-board-form share-access-form">
+        <h2>Choose share access</h2>
+        <div class="share-access-options" role="radiogroup" aria-label="Choose share access">
+          <label class="share-access-option">
+            <input type="radio" name="share-access-level" value="view" />
+            <span>View only</span>
+          </label>
+          <label class="share-access-option">
+            <input type="radio" name="share-access-level" value="feedback" />
+            <span>Feedback only</span>
+          </label>
+          <label class="share-access-option">
+            <input type="radio" name="share-access-level" value="edit" />
+            <span>Full access</span>
+          </label>
+        </div>
+        <p id="share-access-error" class="share-access-error hidden" aria-live="polite"></p>
+        <menu>
+          <button id="share-access-cancel-btn" type="button" class="cancel-btn">Cancel</button>
+          <button id="share-access-copy-btn" type="submit">Copy Link</button>
         </menu>
       </form>
     </dialog>
