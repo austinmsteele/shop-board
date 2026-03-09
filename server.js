@@ -49,7 +49,8 @@ const ITEM_NAME_MAX_LENGTH = 200;
 const DEFAULT_DEMO_TEMPLATE_SLUG = String(process.env.DEMO_TEMPLATE_DEFAULT_SLUG || 'renovation-demo').trim().toLowerCase() || 'renovation-demo';
 const DEFAULT_DEMO_BOARD_NAME = String(process.env.DEMO_TEMPLATE_BOARD_NAME || 'Demo Renovation Board').trim() || 'Demo Renovation Board';
 const DEMO_TEMPLATE_OWNER_EMAIL = String(process.env.DEMO_TEMPLATE_OWNER_EMAIL || '').trim().toLowerCase();
-const DEMO_TEMPLATE_OWNER_BOARD_NAME = String(process.env.DEMO_TEMPLATE_OWNER_BOARD_NAME || 'Home Reno').trim() || 'Home Reno';
+const LEGACY_DEMO_TEMPLATE_OWNER_BOARD_NAME = 'Home Reno';
+const DEMO_TEMPLATE_OWNER_BOARD_NAME = String(process.env.DEMO_TEMPLATE_OWNER_BOARD_NAME || 'Home Reno Template').trim() || 'Home Reno Template';
 const DEMO_TEMPLATE_OWNER_TEMPLATE_SLUG = String(process.env.DEMO_TEMPLATE_OWNER_TEMPLATE_SLUG || DEFAULT_DEMO_TEMPLATE_SLUG).trim() || DEFAULT_DEMO_TEMPLATE_SLUG;
 const DEMO_TEMPLATE_ADMIN_EMAILS = new Set(
   String(process.env.DEMO_TEMPLATE_ADMIN_EMAILS || '')
@@ -198,6 +199,9 @@ async function resolveAnonymousSnapshot(db) {
   if (!normalizedName) {
     normalizedBoard.name = String(template.title || DEFAULT_DEMO_BOARD_NAME).trim() || DEFAULT_DEMO_BOARD_NAME;
   }
+  if (isOwnerTemplateBoardName(normalizedBoard.name)) {
+    normalizedBoard.name = getPreferredOwnerTemplateBoardName();
+  }
   return normalizeAppDataSnapshot({
     boards: [normalizedBoard]
   });
@@ -270,7 +274,11 @@ function slugifyCategoryKey(value) {
 }
 
 function respondJson(res, status, payload) {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store, max-age=0',
+    Pragma: 'no-cache'
+  });
   res.end(JSON.stringify(payload));
 }
 
@@ -861,18 +869,58 @@ function findBoardIdByName(snapshot, boardName) {
   return '';
 }
 
+function findBoardIdByNames(snapshot, boardNames = []) {
+  if (!Array.isArray(boardNames) || !boardNames.length) return '';
+  for (const name of boardNames) {
+    const found = findBoardIdByName(snapshot, name);
+    if (found) return found;
+  }
+  return '';
+}
+
+function getOwnerTemplateBoardNameCandidates() {
+  const candidates = [
+    DEMO_TEMPLATE_OWNER_BOARD_NAME,
+    LEGACY_DEMO_TEMPLATE_OWNER_BOARD_NAME
+  ];
+  const out = [];
+  const seen = new Set();
+  for (const rawName of candidates) {
+    const normalizedName = normalizeDemoBoardName(rawName, '');
+    if (!normalizedName) continue;
+    const key = normalizeBoardNameForMatch(normalizedName);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(normalizedName);
+  }
+  return out;
+}
+
+function getPreferredOwnerTemplateBoardName() {
+  return getOwnerTemplateBoardNameCandidates()[0] || LEGACY_DEMO_TEMPLATE_OWNER_BOARD_NAME;
+}
+
+function isOwnerTemplateBoardName(value) {
+  const target = normalizeBoardNameForMatch(value);
+  if (!target) return false;
+  return getOwnerTemplateBoardNameCandidates().some(
+    (candidate) => normalizeBoardNameForMatch(candidate) === target
+  );
+}
+
 function tryAutoSyncOwnerTemplateFromSnapshot(db, userId, snapshot) {
   if (!tableExists(db, 'board_templates')) return;
   const ownerEmail = normalizeEmailAddress(DEMO_TEMPLATE_OWNER_EMAIL);
   if (!ownerEmail) return;
-  const boardName = String(DEMO_TEMPLATE_OWNER_BOARD_NAME || '').trim();
-  if (!boardName) return;
+  const ownerBoardNames = getOwnerTemplateBoardNameCandidates();
+  const boardName = ownerBoardNames[0] || '';
+  if (!ownerBoardNames.length || !boardName) return;
 
   const user = readPublicUserById(db, userId);
   if (!user) return;
   if (normalizeEmailAddress(user.email) !== ownerEmail) return;
 
-  const sourceBoardId = findBoardIdByName(snapshot, boardName);
+  const sourceBoardId = findBoardIdByNames(snapshot, ownerBoardNames);
   if (!sourceBoardId) return;
 
   try {
@@ -1037,6 +1085,20 @@ async function resolveSharedBoardById(db, boardId, ownerUserId = '') {
   const anonymousBoard = findBoardInSnapshot(anonymousSnapshot, normalizedBoardId);
   if (anonymousBoard) return cloneJson(anonymousBoard, anonymousBoard);
   return null;
+}
+
+function mergeSharedBoardIntoSnapshot(snapshot, board) {
+  const normalizedSnapshot = normalizeAppDataSnapshot(snapshot);
+  const normalizedBoardId = String(board?.id || '').trim();
+  if (!normalizedBoardId) return normalizedSnapshot;
+  const sharedBoard = cloneJson(board, board);
+  const existingBoards = Array.isArray(normalizedSnapshot.boards) ? normalizedSnapshot.boards : [];
+  const remainingBoards = existingBoards.filter(
+    (entry) => String(entry?.id || '').trim() !== normalizedBoardId
+  );
+  return normalizeAppDataSnapshot({
+    boards: [sharedBoard, ...remainingBoards]
+  });
 }
 
 function listBoardItems(board) {
@@ -1764,8 +1826,13 @@ function provisionDemoBoardForUser(db, userId, options = {}) {
     };
   }
 
+  const requestedBoardName = String(options?.boardName || '').trim();
+  let clonedBoardName = requestedBoardName;
+  if (!clonedBoardName && isOwnerTemplateBoardName(template?.title || '')) {
+    clonedBoardName = getPreferredOwnerTemplateBoardName();
+  }
   const cloned = cloneBoardFromTemplateRecord(template, {
-    boardName: options?.boardName
+    boardName: clonedBoardName
   });
 
   db.exec('BEGIN IMMEDIATE');
@@ -1827,16 +1894,17 @@ async function ensureOwnerMasterBoardAttached(db, userId) {
     return { attached: false, reason: 'not-owner' };
   }
 
-  const ownerBoardName = normalizeDemoBoardName(DEMO_TEMPLATE_OWNER_BOARD_NAME, 'Home Reno');
+  const ownerBoardNames = getOwnerTemplateBoardNameCandidates();
+  const ownerBoardName = ownerBoardNames[0] || getPreferredOwnerTemplateBoardName();
   const existingSnapshot = readUserSnapshot(db, normalizedUserId);
-  if (findBoardIdByName(existingSnapshot, ownerBoardName)) {
+  if (findBoardIdByNames(existingSnapshot, ownerBoardNames)) {
     return { attached: false, reason: 'owner-board-exists' };
   }
 
   let cloned = null;
   try {
     const sharedSnapshot = await readAppDataSnapshot();
-    const sourceBoardId = findBoardIdByName(sharedSnapshot, ownerBoardName);
+    const sourceBoardId = findBoardIdByNames(sharedSnapshot, ownerBoardNames);
     const sourceBoard = sourceBoardId ? findBoardInSnapshot(sharedSnapshot, sourceBoardId) : null;
     if (sourceBoard) {
       const sourceFieldCategories = normalizeTemplateFieldCategories([], sourceBoard);
@@ -1871,7 +1939,7 @@ async function ensureOwnerMasterBoardAttached(db, userId) {
   db.exec('BEGIN IMMEDIATE');
   try {
     const latestSnapshot = readUserSnapshot(db, normalizedUserId);
-    if (findBoardIdByName(latestSnapshot, ownerBoardName)) {
+    if (findBoardIdByNames(latestSnapshot, ownerBoardNames)) {
       db.exec('COMMIT');
       return { attached: false, reason: 'owner-board-exists' };
     }
@@ -5991,7 +6059,8 @@ async function extractProductData(targetUrl) {
 
 async function serveStatic(req, res) {
   const parsed = new URL(req.url || '/', 'http://localhost');
-  const rawPath = parsed.pathname === '/' ? '/index.html' : parsed.pathname;
+  const isShareRoute = /^\/share\/[^/]+\/?$/.test(parsed.pathname);
+  const rawPath = parsed.pathname === '/' || isShareRoute ? '/index.html' : parsed.pathname;
   const requestPath = decodeURIComponent(rawPath).replace(/^\/+/, '');
   const filePath = path.join(publicDir, requestPath);
 
@@ -6771,6 +6840,16 @@ export function createServer({ databasePath = dbPath } = {}) {
 
       if (pathname === '/api/data') {
         if (method === 'GET') {
+          const requestedSharedBoardId = String(parsedUrl.searchParams.get('board') || '').trim();
+          const requestedSharedOwnerId = String(parsedUrl.searchParams.get('owner') || '').trim();
+          let requestedSharedBoard = null;
+          if (requestedSharedBoardId) {
+            try {
+              requestedSharedBoard = await resolveSharedBoardById(db, requestedSharedBoardId, requestedSharedOwnerId);
+            } catch (error) {
+              console.warn('Could not resolve requested shared board during /api/data load:', error);
+            }
+          }
           const authContext = lookupAuthContext(db, req);
           if (authContext.authenticated && authContext.user) {
             try {
@@ -6789,13 +6868,20 @@ export function createServer({ databasePath = dbPath } = {}) {
             } catch (error) {
               console.warn('Could not auto-attach owner master board during /api/data load:', error);
             }
-            respondJson(res, 200, readUserSnapshot(db, authContext.user.id));
+            const userSnapshot = readUserSnapshot(db, authContext.user.id);
+            const payload = requestedSharedBoard
+              ? mergeSharedBoardIntoSnapshot(userSnapshot, requestedSharedBoard)
+              : userSnapshot;
+            respondJson(res, 200, payload);
             return;
           } else if (authContext.sessionToken) {
             appendSetCookieHeader(res, createClearSessionCookie(req));
           }
           const anonymousSnapshot = await resolveAnonymousSnapshot(db);
-          respondJson(res, 200, anonymousSnapshot);
+          const payload = requestedSharedBoard
+            ? mergeSharedBoardIntoSnapshot(anonymousSnapshot, requestedSharedBoard)
+            : anonymousSnapshot;
+          respondJson(res, 200, payload);
           return;
         }
         if (method === 'PUT') {

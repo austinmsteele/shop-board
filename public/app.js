@@ -10,6 +10,12 @@ const ITEM_NAME_MAX_LENGTH = 200;
 const SHARE_ACCESS_EDIT = 'edit';
 const SHARE_ACCESS_FEEDBACK = 'feedback';
 const SHARE_ACCESS_VIEW = 'view';
+const SHARE_ICON_SVG = `
+<svg viewBox="0 0 24 24" fill="none" focusable="false">
+  <path d="M14 3h7v7" />
+  <path d="M10 14L21 3" />
+  <path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
+</svg>`;
 
 const appShell = document.querySelector('#app-shell');
 const homeScreen = document.querySelector('#home-screen');
@@ -2105,8 +2111,8 @@ async function enterAppShell() {
   if (!appReady) {
     appReady = true;
   }
-  await ensureInitialShareBoardLoaded();
-  applyInitialShareLinkState();
+  await resolveInitialShareIntentWithRetries();
+  if (initialShareIntent) applyInitialShareLinkState();
   renderApp();
 }
 
@@ -2251,9 +2257,19 @@ function getCurrentSessionOwnerKey() {
   return userId ? `user:${userId}` : '';
 }
 
+function buildInitialDataHydrationPath() {
+  const boardId = String(initialShareIntent?.boardId || '').trim();
+  if (!boardId) return '/api/data';
+  const params = new URLSearchParams();
+  params.set('board', boardId);
+  const ownerId = String(initialShareIntent?.ownerId || '').trim();
+  if (ownerId) params.set('owner', ownerId);
+  return `/api/data?${params.toString()}`;
+}
+
 async function hydrateDataFromServer() {
   try {
-    const payload = await apiRequest('/api/data');
+    const payload = await apiRequest(buildInitialDataHydrationPath());
     const serverBoards = Array.isArray(payload?.boards) ? payload.boards : [];
     const normalizedServerData = { boards: serverBoards.map(normalizeBoard) };
     const hasServerData = normalizedServerData.boards.length > 0;
@@ -2292,8 +2308,8 @@ async function hydrateDataFromServer() {
       lastSavedSnapshot = serializeDataSnapshot(data);
       undoHistory = [];
       redoHistory = [];
-      await ensureInitialShareBoardLoaded();
-      applyInitialShareLinkState();
+      await resolveInitialShareIntentWithRetries();
+      if (initialShareIntent) applyInitialShareLinkState();
       renderApp();
       if (shouldClearLocalSnapshot) clearLegacyLocalDataKeys();
       return;
@@ -2977,7 +2993,15 @@ function formatCustomFieldValue(category, entry) {
 }
 
 async function apiRequest(path, options = {}) {
-  const response = await fetch(path, options);
+  const requestOptions = { ...options };
+  if (!requestOptions.method || String(requestOptions.method).toUpperCase() === 'GET') {
+    requestOptions.cache = 'no-store';
+    requestOptions.headers = {
+      ...(requestOptions.headers || {}),
+      'Cache-Control': 'no-cache'
+    };
+  }
+  const response = await fetch(path, requestOptions);
   let payload = {};
   try {
     payload = await response.json();
@@ -3289,14 +3313,29 @@ function canManageFeedbackInSharedScope(board = null) {
   return access === SHARE_ACCESS_EDIT || access === SHARE_ACCESS_FEEDBACK;
 }
 
+function isSharedLinkScopeActive(board = null) {
+  const activeBoard = board || getActiveBoard();
+  if (!activeBoard) return false;
+  return String(sharedCategoryScopeBoardId || '') === String(activeBoard.id || '');
+}
+
+function ensureAuthenticatedForSharedEdits(board = null) {
+  if (activeSessionUser) return true;
+  if (!isSharedLinkScopeActive(board)) return true;
+  showNoticeDialog('You must create an account in order to edit this board.');
+  return false;
+}
+
 function ensureSharedBoardEditAccess(action = 'make changes', board = null) {
   void action;
-  return canEditSharedBoardContent(board);
+  if (!canEditSharedBoardContent(board)) return false;
+  return ensureAuthenticatedForSharedEdits(board);
 }
 
 function ensureSharedFeedbackAccess(action = 'manage feedback', board = null) {
   void action;
-  return canManageFeedbackInSharedScope(board);
+  if (!canManageFeedbackInSharedScope(board)) return false;
+  return ensureAuthenticatedForSharedEdits(board);
 }
 
 function getCategoryItemCollectionByPath(board, pathIds) {
@@ -3981,23 +4020,49 @@ function getAllBoardItems(board) {
   return [...categoryItems, ...rootItems];
 }
 
+function delayMs(duration = 0) {
+  const timeout = Number(duration);
+  if (!Number.isFinite(timeout) || timeout <= 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    setTimeout(resolve, timeout);
+  });
+}
+
 async function fetchSharedBoardForShareIntent(boardId, ownerId = '') {
   const normalizedBoardId = String(boardId || '').trim();
   if (!normalizedBoardId) return null;
-  try {
-    const params = new URLSearchParams();
-    params.set('board', normalizedBoardId);
-    const normalizedOwnerId = String(ownerId || '').trim();
-    if (normalizedOwnerId) params.set('owner', normalizedOwnerId);
-    const response = await fetch(`/api/shared-board?${params.toString()}`);
-    if (!response.ok) return null;
-    const payload = await response.json();
-    const board = normalizeBoard(payload?.board || {});
-    if (String(board?.id || '').trim() !== normalizedBoardId) return null;
-    return board;
-  } catch {
-    return null;
+
+  const normalizedOwnerId = String(ownerId || '').trim();
+  const ownerAttempts = normalizedOwnerId ? [normalizedOwnerId, ''] : [''];
+  const backoffSchedule = [0, 180, 420, 900];
+
+  for (const waitTime of backoffSchedule) {
+    if (waitTime > 0) await delayMs(waitTime);
+    for (const ownerAttempt of ownerAttempts) {
+      const params = new URLSearchParams();
+      params.set('board', normalizedBoardId);
+      if (ownerAttempt) params.set('owner', ownerAttempt);
+      // Avoid cached intermediary responses on repeated attempts.
+      params.set('_t', String(Date.now()));
+      try {
+        const response = await fetch(`/api/shared-board?${params.toString()}`, {
+          cache: 'no-store',
+          headers: {
+            'Cache-Control': 'no-cache'
+          }
+        });
+        if (!response.ok) continue;
+        const payload = await response.json();
+        const board = normalizeBoard(payload?.board || {});
+        if (String(board?.id || '').trim() !== normalizedBoardId) continue;
+        return board;
+      } catch {
+        // Retry path below
+      }
+    }
   }
+
+  return null;
 }
 
 async function ensureInitialShareBoardLoaded() {
@@ -4017,13 +4082,68 @@ async function ensureInitialShareBoardLoaded() {
   return true;
 }
 
+async function resolveInitialShareIntentWithRetries() {
+  const boardId = String(initialShareIntent?.boardId || '').trim();
+  if (!boardId) return false;
+
+  const directApply = applyInitialShareLinkState();
+  if (directApply) return true;
+
+  const attempts = 3;
+  for (let index = 0; index < attempts; index += 1) {
+    await ensureInitialShareBoardLoaded();
+    if (applyInitialShareLinkState()) return true;
+    await delayMs(120 * (index + 1));
+  }
+
+  return false;
+}
+
 function readInitialShareIntent() {
+  const normalizeBoardId = (rawValue) => {
+    const value = String(rawValue || '').trim();
+    if (!value) return '';
+    const matchedUuid = value.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+    if (matchedUuid) return matchedUuid[0].toLowerCase();
+    return value.replace(/[^0-9a-z-]/gi, '');
+  };
+
+  const extractSharePathBoardId = (pathname) => {
+    const text = String(pathname || '').trim();
+    const match = text.match(/^\/share\/([^/]+)\/?$/i);
+    return normalizeBoardId(match?.[1] || '');
+  };
+
+  const readHashParams = (hashValue) => {
+    const raw = String(hashValue || '').replace(/^#/, '').trim();
+    if (!raw) return new URLSearchParams();
+    return new URLSearchParams(raw.startsWith('?') ? raw.slice(1) : raw);
+  };
+
   try {
     const url = new URL(window.location.href);
-    const boardId = String(url.searchParams.get('board') || '').trim();
-    const categoryParam = String(url.searchParams.get('category') || '').trim();
-    const accessParam = String(url.searchParams.get('access') || '').trim().toLowerCase();
-    const ownerId = String(url.searchParams.get('owner') || '').trim();
+    const hashParams = readHashParams(url.hash);
+    const boardId = normalizeBoardId(
+      url.searchParams.get('board')
+      || hashParams.get('board')
+      || hashParams.get('shareBoard')
+      || extractSharePathBoardId(url.pathname)
+    );
+    const categoryParam = String(
+      url.searchParams.get('category')
+      || hashParams.get('category')
+      || ''
+    ).trim();
+    const accessParam = String(
+      url.searchParams.get('access')
+      || hashParams.get('access')
+      || ''
+    ).trim().toLowerCase();
+    const ownerId = String(
+      url.searchParams.get('owner')
+      || hashParams.get('owner')
+      || ''
+    ).trim();
     return {
       boardId,
       categoryParam,
@@ -4531,6 +4651,8 @@ async function copyBoardShareLink(board) {
   if (!board) return;
   const selectedAccess = await promptCategoryShareAccess();
   if (!selectedAccess) return;
+  const readyToShare = await ensureBoardShareReady(board.id);
+  if (!readyToShare) return;
   const link = buildBoardShareLink(board.id, selectedAccess);
   if (!link) return;
   copyShareLink(link, {
@@ -4548,6 +4670,8 @@ async function copyCategoryShareLink(board, categoryPathIds = []) {
   }
   const selectedAccess = await promptCategoryShareAccess();
   if (!selectedAccess) return;
+  const readyToShare = await ensureBoardShareReady(board.id);
+  if (!readyToShare) return;
   const link = buildCategoryShareLink(board.id, path, selectedAccess);
   if (!link) return;
   copyShareLink(link, {
@@ -4558,6 +4682,25 @@ async function copyCategoryShareLink(board, categoryPathIds = []) {
 
 function buildBoardShareLink(boardId, accessLevel = SHARE_ACCESS_EDIT) {
   return buildShareLink(boardId, [], accessLevel);
+}
+
+async function ensureBoardShareReady(boardId) {
+  const normalizedBoardId = String(boardId || '').trim();
+  if (!normalizedBoardId) return false;
+
+  // Best effort: push the latest board state before generating a link.
+  if (activeSessionUser) {
+    const latestSnapshot = serializeDataSnapshot(data);
+    if (latestSnapshot) {
+      await persistSnapshotToServer(latestSnapshot);
+    }
+  }
+
+  const ownerId = getShareLinkOwnerId(normalizedBoardId);
+  // Warm up shared-board resolution when available, but do not block copy.
+  await fetchSharedBoardForShareIntent(normalizedBoardId, ownerId);
+
+  return true;
 }
 
 function buildCategoryShareLink(boardId, categoryPathIds = [], accessLevel = SHARE_ACCESS_EDIT) {
@@ -4577,7 +4720,8 @@ function buildShareLink(boardId, categoryPathIds = [], accessLevel = '') {
   if (!boardId) return '';
   const ownerId = getShareLinkOwnerId(boardId);
   try {
-    const url = new URL(window.location.href);
+    const url = new URL(window.location.origin);
+    url.pathname = '/';
     url.searchParams.set('board', boardId);
     const encodedPath = encodeCategoryPath(categoryPathIds);
     const normalizedAccess = normalizeShareAccessLevel(accessLevel, SHARE_ACCESS_EDIT);
@@ -4592,6 +4736,12 @@ function buildShareLink(boardId, categoryPathIds = [], accessLevel = '') {
       url.searchParams.delete('owner');
     }
     url.searchParams.set('access', normalizedAccess);
+    const hashParams = new URLSearchParams();
+    hashParams.set('shareBoard', boardId);
+    if (encodedPath) hashParams.set('category', encodedPath);
+    if (ownerId) hashParams.set('owner', ownerId);
+    hashParams.set('access', normalizedAccess);
+    url.hash = hashParams.toString();
     return url.toString();
   } catch {
     const params = new URLSearchParams();
@@ -4601,7 +4751,12 @@ function buildShareLink(boardId, categoryPathIds = [], accessLevel = '') {
     if (encodedPath) params.set('category', encodedPath);
     if (ownerId) params.set('owner', ownerId);
     params.set('access', normalizedAccess);
-    return `${window.location.origin}${window.location.pathname}?${params.toString()}`;
+    const hashParams = new URLSearchParams();
+    hashParams.set('shareBoard', boardId);
+    if (encodedPath) hashParams.set('category', encodedPath);
+    if (ownerId) hashParams.set('owner', ownerId);
+    hashParams.set('access', normalizedAccess);
+    return `${window.location.origin}/?${params.toString()}#${hashParams.toString()}`;
   }
 }
 
@@ -5949,9 +6104,9 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
   shareActionBtn.type = 'button';
   shareActionBtn.className = 'category-card-delete-action';
   const shareIcon = document.createElement('span');
-  shareIcon.className = 'category-card-menu-icon';
+  shareIcon.className = 'category-card-menu-icon share-icon';
   shareIcon.setAttribute('aria-hidden', 'true');
-  shareIcon.textContent = '↗';
+  shareIcon.innerHTML = SHARE_ICON_SVG;
   const shareText = document.createElement('span');
   shareText.textContent = depth > 0 ? 'Share Subcategory' : 'Share category';
   shareActionBtn.appendChild(shareIcon);
