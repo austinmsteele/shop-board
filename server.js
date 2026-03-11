@@ -2992,6 +2992,17 @@ function isHomeDepotUrl(value) {
   }
 }
 
+function isBhPhotoUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return false;
+  try {
+    const host = new URL(raw).hostname.toLowerCase().replace(/^www\./, '');
+    return host === 'bhphotovideo.com' || host.endsWith('.bhphotovideo.com') || host === 'bhphoto.com' || host.endsWith('.bhphoto.com');
+  } catch {
+    return /(?:^|\.)bhphotovideo\.com(?:$|\/)|(?:^|\.)bhphoto\.com(?:$|\/)/i.test(raw);
+  }
+}
+
 function isLowesUrl(value) {
   const raw = String(value || '').trim();
   if (!raw) return false;
@@ -3316,6 +3327,26 @@ function extractHomeDepotProductImagesFromHtml(html = '') {
   return dedupeImageUrls(out, 30);
 }
 
+function extractBhPhotoImageCandidatesFromUrl(sourceUrl = '') {
+  if (!isBhPhotoUrl(sourceUrl)) return [];
+  try {
+    const parsed = new URL(sourceUrl);
+    const path = String(parsed.pathname || '');
+    const match = path.match(/\/c\/(?:product|replacement_for)\/(\d+)-[a-z0-9]+\/([^/?#]+?)(?:\.html?)?\/?$/i);
+    if (!match) return [];
+    const productId = String(match[1] || '').trim();
+    const slug = decodeURIComponent(String(match[2] || ''))
+      .replace(/\.(?:html?)$/i, '')
+      .replace(/[^a-z0-9_-]/gi, '')
+      .trim();
+    if (!productId || !slug) return [];
+    const fbImage = `https://www.bhphotovideo.com/images/fb/${slug}_${productId}.jpg`;
+    return dedupeImageUrls([fbImage], 6);
+  } catch {
+    return [];
+  }
+}
+
 function extractAmazonPriceFromHtml(html) {
   const candidates = [];
   const push = (raw, score = 0, index = 0) => {
@@ -3363,6 +3394,7 @@ function collectImageCandidatesFromHtml(baseUrl, html, meta = {}, jsonLd = {}) {
   const out = [];
   const isAmazon = isAmazonUrl(baseUrl);
   const isHomeDepot = isHomeDepotUrl(baseUrl);
+  const isBhPhoto = isBhPhotoUrl(baseUrl);
   const push = (candidate) => {
     if (!candidate) return;
     const url = absoluteUrl(baseUrl, candidate);
@@ -3418,6 +3450,12 @@ function collectImageCandidatesFromHtml(baseUrl, html, meta = {}, jsonLd = {}) {
   }
   if (isHomeDepot) {
     for (const candidate of extractHomeDepotProductImagesFromHtml(html)) {
+      push(candidate);
+    }
+  }
+
+  if (isBhPhoto && !out.length) {
+    for (const candidate of extractBhPhotoImageCandidatesFromUrl(baseUrl)) {
       push(candidate);
     }
   }
@@ -3564,6 +3602,7 @@ function minimalFallbackFromUrl(rawUrl, highlights = []) {
   const url = new URL(rawUrl);
   const seller = url.hostname.replace(/^www\./, '');
   const productTitleRaw = normalizeTitle(titleFromUrl(rawUrl));
+  const bhImageFallbacks = extractBhPhotoImageCandidatesFromUrl(rawUrl);
   return {
     url: rawUrl,
     brand: '',
@@ -3572,8 +3611,8 @@ function minimalFallbackFromUrl(rawUrl, highlights = []) {
     brandConfidence: 0,
     productTitleRaw,
     name: buildItemName(productTitleRaw, rawUrl),
-    image: '',
-    images: [],
+    image: bhImageFallbacks[0] || '',
+    images: bhImageFallbacks,
     seller,
     price: '',
     highlights,
@@ -5879,20 +5918,29 @@ async function extractViaMicrolink(targetUrl) {
   const finalUrl = data.url || targetUrl;
   const base = minimalFallbackFromUrl(finalUrl);
   const productTitleRaw = normalizeTitle(String(data.title || base.productTitleRaw || '').trim());
+  const bhImageFallbacks = dedupeImageUrls(
+    [
+      ...extractBhPhotoImageCandidatesFromUrl(finalUrl),
+      ...extractBhPhotoImageCandidatesFromUrl(targetUrl)
+    ],
+    6
+  );
+  const microlinkImage = looksLikeProductImage(data.image?.url)
+    ? data.image?.url || ''
+    : looksLikeProductImage(data.screenshot?.url)
+      ? data.screenshot?.url || ''
+      : bhImageFallbacks[0] || '';
 
   return {
     ...base,
     productTitleRaw,
     name: buildItemName(productTitleRaw || base.name, finalUrl),
-    image: looksLikeProductImage(data.image?.url)
-      ? data.image?.url || ''
-      : looksLikeProductImage(data.screenshot?.url)
-        ? data.screenshot?.url || ''
-        : '',
+    image: microlinkImage,
     images: dedupeImageUrls(
       [
         data.image?.url || '',
-        data.screenshot?.url || ''
+        data.screenshot?.url || '',
+        ...bhImageFallbacks
       ],
       30
     ),
@@ -5981,6 +6029,14 @@ async function extractViaZyte(targetUrl) {
       .map((entry) => entry?.url || '')
       .filter(Boolean)
     : [];
+  const bhImageFallbacks = dedupeImageUrls(
+    [
+      ...extractBhPhotoImageCandidatesFromUrl(finalUrl),
+      ...extractBhPhotoImageCandidatesFromUrl(targetUrl)
+    ],
+    6
+  );
+  const mergedImages = dedupeImageUrls([imageCandidate, ...images, ...browserImages, ...bhImageFallbacks], 30);
 
   const brand =
     product?.brand ||
@@ -6029,8 +6085,10 @@ async function extractViaZyte(targetUrl) {
     brandConfidence,
     productTitleRaw,
     name: buildItemName(productTitleRaw || base.name, finalUrl),
-    image: looksLikeProductImage(imageCandidate) ? imageCandidate : (browserImages[0] || ''),
-    images: dedupeImageUrls([imageCandidate, ...images, ...browserImages], 30),
+    image: looksLikeProductImage(imageCandidate)
+      ? imageCandidate
+      : (browserImages[0] || mergedImages[0] || ''),
+    images: mergedImages,
     seller: base.seller,
     price,
     description: String(product?.description || '').replace(/\s+/g, ' ').trim(),
@@ -6069,6 +6127,7 @@ async function extractViaJinaAi(targetUrl) {
     throw new ExtractError('Jina mirror returned blocked/invalid page content.', 422);
   }
   const base = minimalFallbackFromUrl(targetUrl);
+  const bhImageFallbacks = extractBhPhotoImageCandidatesFromUrl(targetUrl);
 
   const titleMatch = text.match(/^Title:\s*(.+)$/im);
   const productTitleRaw = normalizeTitle(titleMatch ? titleMatch[1].trim() : base.productTitleRaw || '');
@@ -6079,8 +6138,8 @@ async function extractViaJinaAi(targetUrl) {
     ...base,
     productTitleRaw,
     name: buildItemName(productTitleRaw || base.name, targetUrl),
-    image: imageMatch && looksLikeProductImage(imageMatch[1]) ? imageMatch[1] : '',
-    images: dedupeImageUrls(allImageMatches, 30),
+    image: imageMatch && looksLikeProductImage(imageMatch[1]) ? imageMatch[1] : (bhImageFallbacks[0] || ''),
+    images: dedupeImageUrls([...allImageMatches, ...bhImageFallbacks], 30),
     price: extractPriceFromText(text),
     description: splitToSentences(text).slice(0, 3).join('. '),
     dimensions: collectDimensionsFromText(text),

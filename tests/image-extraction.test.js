@@ -177,3 +177,14 @@ test('collectImageCandidatesFromHtml excludes B&H oldIEMessage browser icon asse
   assert.equal(images.length, 1);
   assert.ok(images[0].includes('images500x500/amaran_demo_1725678.jpg'));
 });
+
+test('collectImageCandidatesFromHtml derives B&H fallback image from product URL when page has no valid images', () => {
+  const baseUrl = 'https://www.bhphotovideo.com/c/product/1753990-REG/amaran_apm022xa10_amaran_cob_200x_s.html';
+  const html = '<html><body></body></html>';
+  const images = __testOnlyCollectImageCandidatesFromHtml(baseUrl, html, {}, {});
+  assert.ok(images.length >= 1);
+  assert.equal(
+    images[0],
+    'https://www.bhphotovideo.com/images/fb/amaran_apm022xa10_amaran_cob_200x_s_1753990.jpg'
+  );
+});
