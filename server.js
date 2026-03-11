@@ -1187,6 +1187,35 @@ function mergeSharedBoardIntoSnapshot(snapshot, board) {
   });
 }
 
+function replaceBoardInSnapshot(snapshot, board, options = {}) {
+  const normalizedSnapshot = normalizeAppDataSnapshot(snapshot);
+  const nextBoardId = String(board?.id || '').trim();
+  if (!nextBoardId) {
+    return {
+      snapshot: normalizedSnapshot,
+      replaced: false
+    };
+  }
+  const insertIfMissing = options?.insertIfMissing === true;
+  const incomingBoard = cloneJson(board, board);
+  const boards = Array.isArray(normalizedSnapshot?.boards) ? normalizedSnapshot.boards : [];
+  let replaced = false;
+  const nextBoards = boards.map((entry) => {
+    const entryId = String(entry?.id || '').trim();
+    if (entryId !== nextBoardId) return entry;
+    replaced = true;
+    return incomingBoard;
+  });
+  if (!replaced && insertIfMissing) {
+    nextBoards.unshift(incomingBoard);
+    replaced = true;
+  }
+  return {
+    snapshot: normalizeAppDataSnapshot({ boards: nextBoards }),
+    replaced
+  };
+}
+
 function listBoardItems(board) {
   const items = [];
   const seenIds = new Set();
@@ -7070,7 +7099,37 @@ export function createServer({ databasePath = dbPath } = {}) {
         if (method === 'PUT') {
           const user = requireAuthenticatedUser();
           if (!user) return;
+          const requestedSharedBoardId = String(parsedUrl.searchParams.get('board') || '').trim();
+          const requestedSharedOwnerId = String(parsedUrl.searchParams.get('owner') || '').trim();
           const body = await readJsonBody(req, 60_000_000);
+          if (requestedSharedBoardId && requestedSharedOwnerId && requestedSharedOwnerId !== user.id) {
+            assertTemplateBoardWriteAccess(db, user, requestedSharedBoardId);
+            const incomingSnapshot = normalizeAppDataSnapshot(body);
+            const incomingBoard = findBoardInSnapshot(incomingSnapshot, requestedSharedBoardId);
+            if (!incomingBoard) {
+              respondJson(res, 400, { error: 'Shared board payload must include the requested board.' });
+              return;
+            }
+            const ownerUser = readPublicUserById(db, requestedSharedOwnerId);
+            if (!ownerUser) {
+              respondJson(res, 404, { error: 'Shared board owner was not found.' });
+              return;
+            }
+            const ownerSnapshot = readUserSnapshot(db, requestedSharedOwnerId);
+            const replaced = replaceBoardInSnapshot(ownerSnapshot, incomingBoard);
+            if (!replaced.replaced) {
+              respondJson(res, 404, { error: 'Shared board was not found on owner account.' });
+              return;
+            }
+            writeUserSnapshot(db, requestedSharedOwnerId, replaced.snapshot);
+            respondJson(res, 200, {
+              ok: true,
+              mode: 'shared-board',
+              boardId: requestedSharedBoardId,
+              ownerId: requestedSharedOwnerId
+            });
+            return;
+          }
           assertTemplateSnapshotWriteAccess(db, user, body);
           writeUserSnapshot(db, user.id, body);
           respondJson(res, 200, { ok: true });

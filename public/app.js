@@ -289,8 +289,10 @@ const itemGridDropEndState = new WeakMap();
 let undoHistory = [];
 let redoHistory = [];
 let lastSavedSnapshot = serializeDataSnapshot(data);
-let pendingServerSnapshot = '';
+let pendingServerSnapshot = null;
 let serverSnapshotPersistInFlight = false;
+const sharedBoardOwnerHints = new Map();
+let sharedHintSessionUserId = '';
 const categoryPreviewHover = document.createElement('div');
 categoryPreviewHover.className = 'category-preview-hover hidden';
 categoryPreviewHover.setAttribute('aria-hidden', 'true');
@@ -1866,6 +1868,15 @@ function deriveAuthUsername(user) {
 }
 
 function applySessionIdentity(user) {
+  const nextUserId = String(user?.id || '').trim();
+  if (!nextUserId) {
+    if (sharedHintSessionUserId) {
+      sharedBoardOwnerHints.clear();
+    }
+  } else if (sharedHintSessionUserId && sharedHintSessionUserId !== nextUserId) {
+    sharedBoardOwnerHints.clear();
+  }
+  sharedHintSessionUserId = nextUserId;
   const fallbackName = user?.displayName || deriveNameFromEmail(user?.email) || 'ShopBoard User';
   currentUserName = fallbackName;
   if (homeAuthBar) {
@@ -2791,7 +2802,9 @@ function saveData(options = {}) {
     persistSnapshotToLocal(serialized);
     return true;
   }
-  queueSnapshotPersist(serialized);
+  queueSnapshotPersist(serialized, {
+    target: getSharedBoardPersistTarget()
+  });
   return true;
 }
 
@@ -2807,36 +2820,115 @@ function persistSnapshotToLocal(serialized) {
   }
 }
 
-function queueSnapshotPersist(serialized) {
-  pendingServerSnapshot = String(serialized || '').trim();
-  if (!pendingServerSnapshot || serverSnapshotPersistInFlight) return;
+function normalizeSnapshotPersistTarget(target) {
+  const boardId = String(target?.boardId || '').trim();
+  const ownerId = String(target?.ownerId || '').trim();
+  if (!boardId || !ownerId) return null;
+  return { boardId, ownerId };
+}
+
+function rememberSharedBoardOwner(boardId = '', ownerId = '') {
+  const normalizedBoardId = String(boardId || '').trim();
+  const normalizedOwnerId = String(ownerId || '').trim();
+  if (!normalizedBoardId || !normalizedOwnerId) return;
+  sharedBoardOwnerHints.set(normalizedBoardId, normalizedOwnerId);
+}
+
+function getSharedBoardOwnerHint(boardId = '') {
+  const normalizedBoardId = String(boardId || '').trim();
+  if (!normalizedBoardId) return '';
+  return String(sharedBoardOwnerHints.get(normalizedBoardId) || '').trim();
+}
+
+function getSharedBoardPersistTarget() {
+  const board = getActiveBoard();
+  if (!board) return null;
+  const boardId = String(board.id || '').trim();
+  if (!boardId) return null;
+  const scopeBoardId = String(sharedCategoryScopeBoardId || '').trim();
+  const scopeOwnerId = String(sharedCategoryScopeOwnerId || '').trim();
+  const hintedOwnerId = getSharedBoardOwnerHint(boardId);
+  const ownerId = scopeBoardId === boardId ? scopeOwnerId || hintedOwnerId : hintedOwnerId;
+  const currentUserId = String(activeSessionUser?.id || '').trim();
+  if (!ownerId || !currentUserId || ownerId === currentUserId) return null;
+  return {
+    boardId,
+    ownerId
+  };
+}
+
+function removeForeignSharedBoardsFromSnapshot(snapshot) {
+  const currentUserId = String(activeSessionUser?.id || '').trim();
+  if (!currentUserId) return snapshot;
+  const boards = Array.isArray(snapshot?.boards) ? snapshot.boards : [];
+  const filteredBoards = boards.filter((board) => {
+    const boardId = String(board?.id || '').trim();
+    if (!boardId) return true;
+    const ownerId = getSharedBoardOwnerHint(boardId);
+    if (!ownerId) return true;
+    return ownerId === currentUserId;
+  });
+  if (filteredBoards.length === boards.length) return snapshot;
+  return { boards: filteredBoards };
+}
+
+function queueSnapshotPersist(serialized, options = {}) {
+  const payload = String(serialized || '').trim();
+  if (!payload) return;
+  pendingServerSnapshot = {
+    serialized: payload,
+    target: normalizeSnapshotPersistTarget(options?.target)
+  };
+  if (serverSnapshotPersistInFlight) return;
   serverSnapshotPersistInFlight = true;
   void flushSnapshotPersistQueue();
 }
 
 async function flushSnapshotPersistQueue() {
   while (pendingServerSnapshot) {
-    const nextSerialized = pendingServerSnapshot;
-    pendingServerSnapshot = '';
-    const persisted = await persistSnapshotToServer(nextSerialized);
+    const nextRequest = pendingServerSnapshot;
+    pendingServerSnapshot = null;
+    const persisted = await persistSnapshotToServer(nextRequest?.serialized || '', {
+      target: nextRequest?.target || null
+    });
     if (!persisted) {
       // Keep the latest snapshot queued; we'll retry on next save.
-      pendingServerSnapshot = nextSerialized;
+      if (!pendingServerSnapshot) {
+        pendingServerSnapshot = nextRequest;
+      }
       break;
     }
   }
   serverSnapshotPersistInFlight = false;
 }
 
-async function persistSnapshotToServer(serialized) {
+async function persistSnapshotToServer(serialized, options = {}) {
   const payload = String(serialized || '').trim();
   if (!payload) return true;
   if (!activeSessionUser) return false;
+  const target = normalizeSnapshotPersistTarget(options?.target);
+  const snapshot = parseDataSnapshot(payload);
+  if (!snapshot) return false;
+  let endpoint = '/api/data';
+  let bodyPayload = payload;
+  if (target) {
+    const targetBoard = (Array.isArray(snapshot.boards) ? snapshot.boards : [])
+      .find((entry) => String(entry?.id || '').trim() === target.boardId);
+    if (!targetBoard) return false;
+    const params = new URLSearchParams();
+    params.set('board', target.boardId);
+    params.set('owner', target.ownerId);
+    endpoint = `/api/data?${params.toString()}`;
+    bodyPayload = serializeDataSnapshot({ boards: [targetBoard] });
+  } else {
+    bodyPayload = serializeDataSnapshot(removeForeignSharedBoardsFromSnapshot(snapshot));
+  }
+  if (!bodyPayload) return false;
   try {
-    const response = await fetch('/api/data', {
+    const response = await fetch(endpoint, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: payload
+      body: bodyPayload
     });
     if (!response.ok) {
       let message = '';
@@ -3783,17 +3875,19 @@ function renderCategoryGallery(categories = []) {
   return grid;
 }
 
-function getCategoryPreviewImages(categoryNode, limit = 5) {
-  const children = Array.isArray(categoryNode?.children) ? categoryNode.children : [];
+function getCategoryPreviewImages(categoryNode, limit = Number.POSITIVE_INFINITY) {
   const picks = [];
-  const seen = new Set();
+  const max = Number.isFinite(Number(limit)) && Number(limit) > 0
+    ? Math.floor(Number(limit))
+    : Number.POSITIVE_INFINITY;
+  const seenItemIds = new Set();
   const addPreview = (item) => {
-    if (!item || picks.length >= limit) return;
+    if (!item || picks.length >= max) return;
+    const itemId = String(item?.id || '').trim();
+    if (itemId && seenItemIds.has(itemId)) return;
     const src = getItemPrimaryImage(item);
     if (!src) return;
-    const key = canonicalImageKey(src) || src;
-    if (seen.has(key)) return;
-    seen.add(key);
+    if (itemId) seenItemIds.add(itemId);
     picks.push({
       src,
       seller: String(item?.seller || '').trim(),
@@ -3801,20 +3895,10 @@ function getCategoryPreviewImages(categoryNode, limit = 5) {
     });
   };
 
-  for (const child of children) {
-    if (picks.length >= limit) break;
-    const childItems = collectAllItemsFromCategory(child);
-    const firstWithImage = childItems.find((item) => Boolean(getItemPrimaryImage(item)));
-    addPreview(firstWithImage);
-  }
-
-  // Fallback for categories without children: show a few own-item images.
-  if (!picks.length) {
-    const ownItems = Array.isArray(categoryNode?.items) ? categoryNode.items : [];
-    for (const item of ownItems) {
-      if (picks.length >= limit) break;
-      addPreview(item);
-    }
+  const allItems = collectAllItemsFromCategory(categoryNode);
+  for (const item of allItems) {
+    if (picks.length >= max) break;
+    addPreview(item);
   }
 
   return picks;
@@ -4173,6 +4257,7 @@ function setSharedCategoryScope(boardId, requestedPath = [], accessLevel = SHARE
   sharedCategoryScopePath = [...path];
   sharedCategoryScopeAccess = normalizeShareAccessLevel(accessLevel, SHARE_ACCESS_EDIT);
   sharedCategoryScopeOwnerId = String(ownerId || '').trim();
+  rememberSharedBoardOwner(sharedCategoryScopeBoardId, sharedCategoryScopeOwnerId);
 }
 
 function getActiveSharedCategoryScope(board) {
@@ -4688,7 +4773,9 @@ async function ensureBoardShareReady(boardId) {
   if (activeSessionUser) {
     const latestSnapshot = serializeDataSnapshot(data);
     if (latestSnapshot) {
-      await persistSnapshotToServer(latestSnapshot);
+      await persistSnapshotToServer(latestSnapshot, {
+        target: getSharedBoardPersistTarget()
+      });
     }
   }
 
@@ -5942,7 +6029,7 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
     }
     editCategoryTitle();
   });
-  const previewImages = getCategoryPreviewImages(categoryNode, 5);
+  const previewImages = getCategoryPreviewImages(categoryNode);
   if (previewImages.length) {
     card.classList.add('has-category-previews');
     const previewStrip = document.createElement('div');
