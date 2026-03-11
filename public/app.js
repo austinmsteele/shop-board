@@ -197,6 +197,7 @@ const DEFAULT_DATA_CATEGORIES = [
 ];
 const CATEGORY_TYPE_OPTIONS = new Set(['text', 'number', 'boolean', 'select']);
 const UNDO_HISTORY_LIMIT = 120;
+const REMOTE_BOARD_SYNC_INTERVAL_MS = 4000;
 let data = loadData();
 let activeBoardId = null;
 let activeView = loadView();
@@ -291,6 +292,9 @@ let redoHistory = [];
 let lastSavedSnapshot = serializeDataSnapshot(data);
 let pendingServerSnapshot = null;
 let serverSnapshotPersistInFlight = false;
+let remoteBoardSyncTimer = null;
+let remoteBoardSyncInFlight = false;
+let remoteBoardSyncLastBoardId = '';
 const sharedBoardOwnerHints = new Map();
 let sharedHintSessionUserId = '';
 const categoryPreviewHover = document.createElement('div');
@@ -1663,6 +1667,7 @@ editForm.addEventListener('submit', (event) => {
 void bootstrapApplication();
 
 async function bootstrapApplication() {
+  ensureRemoteBoardSyncLoop();
   setBetaAuthMode(betaAuthMode);
   const session = await fetchAuthSessionState();
   betaWelcomeGateEnabled = session.betaWelcomeGateEnabled !== false;
@@ -2947,6 +2952,122 @@ async function persistSnapshotToServer(serialized, options = {}) {
   } catch (error) {
     console.warn('Could not persist app snapshot to server:', error);
     return false;
+  }
+}
+
+function ensureRemoteBoardSyncLoop() {
+  if (remoteBoardSyncTimer != null) return;
+  remoteBoardSyncTimer = window.setInterval(() => {
+    void syncActiveBoardFromRemote();
+  }, REMOTE_BOARD_SYNC_INTERVAL_MS);
+}
+
+function hasBlockingBoardEditUI() {
+  return Boolean(
+    isEditingBoardTitle
+    || isEditingCategoryHeaders
+    || activeExtractionJob
+    || editDialog?.open
+    || feedbackDialog?.open
+    || imagePickerDialog?.open
+    || hoverAddDialog?.open
+    || boardEditDialog?.open
+    || boardEditAddDialog?.open
+    || newBoardDialog?.open
+    || categoryAddDialog?.open
+    || categoryDeleteDialog?.open
+    || boardDeleteDialog?.open
+    || shareAccessDialog?.open
+  );
+}
+
+function resolveActiveBoardSyncOwnerId(boardId = '') {
+  const normalizedBoardId = String(boardId || '').trim();
+  if (!normalizedBoardId) return '';
+  const scopeBoardId = String(sharedCategoryScopeBoardId || '').trim();
+  const scopeOwnerId = String(sharedCategoryScopeOwnerId || '').trim();
+  if (scopeBoardId === normalizedBoardId && scopeOwnerId) return scopeOwnerId;
+  const hintedOwnerId = getSharedBoardOwnerHint(normalizedBoardId);
+  if (hintedOwnerId) return hintedOwnerId;
+  return String(activeSessionUser?.id || '').trim();
+}
+
+function serializeBoardSnapshot(board) {
+  try {
+    return JSON.stringify(board || {});
+  } catch {
+    return '';
+  }
+}
+
+async function fetchRemoteBoardSnapshot(boardId, ownerId = '') {
+  const normalizedBoardId = String(boardId || '').trim();
+  if (!normalizedBoardId) return null;
+  const params = new URLSearchParams();
+  params.set('board', normalizedBoardId);
+  if (ownerId) params.set('owner', String(ownerId || '').trim());
+  params.set('_t', String(Date.now()));
+  const response = await fetch(`/api/shared-board?${params.toString()}`, {
+    cache: 'no-store',
+    headers: {
+      'Cache-Control': 'no-cache'
+    }
+  });
+  if (!response.ok) return null;
+  const payload = await response.json();
+  const board = normalizeBoard(payload?.board || {});
+  if (String(board?.id || '').trim() !== normalizedBoardId) return null;
+  return board;
+}
+
+function applyRemoteBoardSnapshot(boardId, remoteBoard) {
+  const normalizedBoardId = String(boardId || '').trim();
+  if (!normalizedBoardId || !remoteBoard) return false;
+  const boards = Array.isArray(data?.boards) ? data.boards : [];
+  const boardIndex = boards.findIndex((entry) => String(entry?.id || '').trim() === normalizedBoardId);
+  if (boardIndex < 0) return false;
+  const localSerialized = serializeBoardSnapshot(boards[boardIndex]);
+  const remoteSerialized = serializeBoardSnapshot(remoteBoard);
+  if (!remoteSerialized || remoteSerialized === localSerialized) return false;
+
+  boards[boardIndex] = normalizeBoard(remoteBoard);
+  lastSavedSnapshot = serializeDataSnapshot(data);
+  renderBoardDetail();
+
+  if (detailDialog?.open && activeDetailItemId != null) {
+    const activeBoard = getActiveBoard();
+    const item = activeBoard ? findItemInBoard(activeBoard, activeDetailItemId) : null;
+    if (item) {
+      renderDetailModal(item);
+    } else {
+      detailDialog.close();
+    }
+  }
+
+  return true;
+}
+
+async function syncActiveBoardFromRemote(options = {}) {
+  if (remoteBoardSyncInFlight) return false;
+  if (document.hidden) return false;
+  if (!options.force && hasBlockingBoardEditUI()) return false;
+
+  const board = getActiveBoard();
+  if (!board) return false;
+  const boardId = String(board.id || '').trim();
+  if (!boardId) return false;
+  const ownerId = resolveActiveBoardSyncOwnerId(boardId);
+
+  remoteBoardSyncInFlight = true;
+  try {
+    const remoteBoard = await fetchRemoteBoardSnapshot(boardId, ownerId);
+    if (!remoteBoard) return false;
+    if (String(activeBoardId || '').trim() !== boardId) return false;
+    return applyRemoteBoardSnapshot(boardId, remoteBoard);
+  } catch {
+    return false;
+  } finally {
+    remoteBoardSyncInFlight = false;
   }
 }
 
@@ -4323,11 +4444,17 @@ function renderApp() {
   boardScreen.classList.toggle('hidden', !isBoardMode);
 
   if (!isBoardMode) {
+    remoteBoardSyncLastBoardId = '';
     renderBoardsHome();
     return;
   }
 
   renderBoardDetail();
+  const normalizedBoardId = String(board.id || '').trim();
+  if (normalizedBoardId && remoteBoardSyncLastBoardId !== normalizedBoardId) {
+    remoteBoardSyncLastBoardId = normalizedBoardId;
+    void syncActiveBoardFromRemote({ force: true });
+  }
   loadBoardCategoryData(board.id).catch(() => {
     // handled in loader
   });
