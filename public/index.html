@@ -66,6 +66,15 @@
         <section class="panel board-title-panel">
           <div id="board-title-wrap" class="board-title-wrap">
             <h2 id="board-title" class="board-title-main" role="button" tabindex="0" aria-label="Edit board name">Board</h2>
+            <button id="board-share-btn" class="board-title-share-btn" type="button" aria-label="Share board" title="Share board">
+              <span class="share-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" focusable="false">
+                  <path d="M14 3h7v7" />
+                  <path d="M10 14L21 3" />
+                  <path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
+                </svg>
+              </span>
+            </button>
           </div>
           <input id="board-title-input" class="board-title-input hidden" type="text" maxlength="80" autocomplete="new-password" autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="text" data-lpignore="true" data-1p-ignore="true" />
         </section>
@@ -169,7 +178,16 @@
           <button class="board-actions-toggle" type="button" aria-label="Board actions" aria-haspopup="true" aria-expanded="false">...</button>
           <div class="board-actions-menu" hidden>
             <button class="board-menu-edit" type="button"><span class="board-menu-icon">✎</span><span>Edit</span></button>
-            <button class="board-menu-share" type="button"><span class="board-menu-icon">↗</span><span>Share</span></button>
+            <button class="board-menu-share" type="button">
+              <span class="board-menu-icon share-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" focusable="false">
+                  <path d="M14 3h7v7" />
+                  <path d="M10 14L21 3" />
+                  <path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
+                </svg>
+              </span>
+              <span>Share</span>
+            </button>
             <button class="board-menu-delete" type="button"><span class="board-menu-icon">🗑</span><span>Delete</span></button>
           </div>
         </div>

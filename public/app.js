@@ -3,7 +3,6 @@ const LEGACY_ITEMS_KEY = 'shopping-organizer-items';
 const VIEW_STORAGE_KEY = 'shopping-organizer-view';
 const DATA_BACKUP_KEY = 'shopping-organizer-data-v1-backup';
 const DATA_OWNER_KEY = 'shopping-organizer-data-owner-v1';
-const BETA_WELCOME_FALLBACK_KEY = 'shopboard-beta-welcome-ack-v2';
 const BETA_AUTH_MODE_SIGN_IN = 'sign-in';
 const BETA_AUTH_MODE_SIGN_UP = 'sign-up';
 const ITEM_NAME_MAX_LENGTH = 200;
@@ -16,6 +15,8 @@ const SHARE_ICON_SVG = `
   <path d="M10 14L21 3" />
   <path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
 </svg>`;
+const TOTAL_COST_ROW_NAME = 'Total Cost';
+const TOTAL_COST_MENU_LABEL = 'Add Total Cost';
 
 const appShell = document.querySelector('#app-shell');
 const homeScreen = document.querySelector('#home-screen');
@@ -232,6 +233,7 @@ let boardEditCustomCandidates = [];
 const expandedCategoryIds = new Set();
 let draggingBoardId = null;
 let addCategoryTargetValue = '';
+const ADD_CATEGORY_BOARD_VALUE = '__board__';
 let pendingCategoryDeleteResolve = null;
 let pendingBoardDeleteResolve = null;
 let pendingShareAccessResolve = null;
@@ -606,7 +608,7 @@ addForm.addEventListener('submit', async (event) => {
     setStatus('Please enter a valid URL.', true);
     return;
   }
-  const selectedCategory = String(addCategorySelect?.value || addCategoryTargetValue || '__auto__').trim() || '__auto__';
+  const selectedCategory = String(addCategorySelect?.value || addCategoryTargetValue || ADD_CATEGORY_BOARD_VALUE).trim() || ADD_CATEGORY_BOARD_VALUE;
   extractionQueue.push({
     id: crypto.randomUUID(),
     boardId: board.id,
@@ -1374,12 +1376,6 @@ if (categoryChildren) {
 if (addCategorySelect) {
   addCategorySelect.addEventListener('change', () => {
     const nextValue = addCategorySelect.value || '';
-    if (nextValue === '__manual_entry__') {
-      handleManualEntryFromAddDropdown();
-      addCategoryTargetValue = '';
-      addCategorySelect.value = '__placeholder__';
-      return;
-    }
     addCategoryTargetValue = nextValue;
   });
 }
@@ -1683,9 +1679,8 @@ async function bootstrapApplication() {
 
 function shouldShowEntryGate(user) {
   if (!betaWelcomeGateEnabled) return false;
-  if (!user) return !hasLocalBetaWelcomeFallback();
-  if (user.hasSeenBetaWelcome) return false;
-  return !hasLocalBetaWelcomeFallback();
+  if (!user) return true;
+  return !user.hasSeenBetaWelcome;
 }
 
 function showBetaGate() {
@@ -1776,7 +1771,6 @@ async function handleBetaEnter() {
   }
   betaEnterBtn?.setAttribute('disabled', 'true');
   setBetaGateMessage('Loading ShopBoard...');
-  persistLocalBetaWelcomeFallback();
   await enterAppShell();
   betaEnterBtn?.removeAttribute('disabled');
 }
@@ -1796,9 +1790,14 @@ async function handleBetaAuthSubmit() {
   setAuthDialogMessage(isSignUp ? 'Creating your account...' : 'Signing you in...');
 
   try {
+    const sharedBoardContextActive = Boolean(
+      String(initialShareIntent?.boardId || '').trim()
+      || String(sharedCategoryScopeBoardId || '').trim()
+    );
     const payload = {
       email,
-      password
+      password,
+      skipDemoBoardProvisioning: sharedBoardContextActive
     };
     const endpoint = isSignUp ? '/api/auth/sign-up' : '/api/auth/sign-in';
     const response = await fetch(endpoint, {
@@ -1940,7 +1939,13 @@ async function performHomeSignOut() {
     lastSavedSnapshot = serializeDataSnapshot(data);
     applySessionIdentity(null);
     closeAuthDialog();
-    await enterAppShell();
+    if (shouldShowEntryGate(activeSessionUser)) {
+      showBetaGate();
+      setBetaGateMessage('');
+      setTimeout(() => betaEnterBtn?.focus(), 0);
+    } else {
+      await enterAppShell();
+    }
     setStatus('Signed out.');
   } catch (error) {
     applySessionIdentity(activeSessionUser);
@@ -2047,10 +2052,7 @@ async function ensureBetaWelcomeAcknowledged() {
     }
     return false;
   }
-  if (!betaWelcomeGateEnabled || activeSessionUser.hasSeenBetaWelcome) {
-    persistLocalBetaWelcomeFallback();
-    return true;
-  }
+  if (!betaWelcomeGateEnabled || activeSessionUser.hasSeenBetaWelcome) return true;
 
   try {
     const response = await fetch('/api/beta/acknowledge', {
@@ -2072,28 +2074,16 @@ async function ensureBetaWelcomeAcknowledged() {
       activeSessionUser = nextUser;
       applySessionIdentity(activeSessionUser);
     }
-    persistLocalBetaWelcomeFallback();
     return true;
   } catch (error) {
-    console.warn('Could not persist beta welcome acknowledgment on account; using local fallback.', error);
-    persistLocalBetaWelcomeFallback();
-    return true;
-  }
-}
-
-function hasLocalBetaWelcomeFallback() {
-  try {
-    return localStorage.getItem(BETA_WELCOME_FALLBACK_KEY) === '1';
-  } catch {
+    const errorMessage = 'Could not confirm your agreement right now. Please try again.';
+    if (authDialog?.open) {
+      setAuthDialogMessage(errorMessage, true);
+    } else {
+      setBetaGateMessage(errorMessage, true);
+    }
+    console.warn('Could not persist beta welcome acknowledgment on account.', error);
     return false;
-  }
-}
-
-function persistLocalBetaWelcomeFallback() {
-  try {
-    localStorage.setItem(BETA_WELCOME_FALLBACK_KEY, '1');
-  } catch {
-    // ignore storage quota failures for non-critical fallback state
   }
 }
 
@@ -2511,10 +2501,11 @@ function normalizeItems(items) {
   const list = Array.isArray(items) ? items : [];
   return list.map((item) => ({
     ...(() => {
+      const isTotalCostRow = Boolean(item?.totalCostRow || item?.isTotalCostRow);
       const url = String(item?.url || '');
       const seller = String(item?.seller || '');
       const brand = String(item?.brand || '');
-      const rawName = String(item?.name || 'Untitled item');
+      const rawName = String(item?.name || (isTotalCostRow ? TOTAL_COST_ROW_NAME : 'Untitled item'));
       const name = normalizeItemName(rawName, url, { brand, seller });
       const highlights = normalizeHighlights(item?.highlights || item?.notes || []);
       const normalizedImages = normalizeImages(item?.images || item?.image || '');
@@ -2536,7 +2527,7 @@ function normalizeItems(items) {
           item?.rank ||
           (item?.chosen || item?.isChosen || item?.selected ? 'gold' : '')
         ),
-        highlights: highlights.length ? highlights : buildLocalHighlights(name, url),
+        highlights: isTotalCostRow ? [] : (highlights.length ? highlights : buildLocalHighlights(name, url)),
         description: String(item?.description || '').trim(),
         dimensions: normalizeDetailList(item?.dimensions || []),
         materials: normalizeDetailList(item?.materials || []),
@@ -2547,7 +2538,8 @@ function normalizeItems(items) {
         customFieldValues: normalizeCustomFieldValues(item?.customFieldValues || item?.custom_fields || {}),
         feedbacks: normalizeFeedbacks(item?.feedbacks || []),
         comments: normalizeComments(item?.comments || []),
-        manualEntry: Boolean(item?.manualEntry)
+        manualEntry: isTotalCostRow ? false : Boolean(item?.manualEntry),
+        totalCostRow: isTotalCostRow
       };
     })()
   }));
@@ -3322,7 +3314,7 @@ function isSharedLinkScopeActive(board = null) {
 function ensureAuthenticatedForSharedEdits(board = null) {
   if (activeSessionUser) return true;
   if (!isSharedLinkScopeActive(board)) return true;
-  showNoticeDialog('You must create an account in order to edit this board.');
+  promptAuthForAction('Create an account or sign in to edit this shared board.');
   return false;
 }
 
@@ -3578,7 +3570,11 @@ function chooseBestLeafTarget(board, seedText = '') {
 
 function getTargetCollectionForAdd(board, payload, rawUrl, selectedCategoryValue = '') {
   const manualValue = String(selectedCategoryValue || addCategoryTargetValue || '').trim();
-  const explicitPath = manualValue && manualValue !== '__auto__' && manualValue !== '__placeholder__'
+  if (manualValue === ADD_CATEGORY_BOARD_VALUE) {
+    if (!Array.isArray(board.items)) board.items = [];
+    return { collection: board.items, pathLabel: String(board?.name || '').trim() || 'Board', auto: false };
+  }
+  const explicitPath = manualValue && manualValue !== '__auto__' && manualValue !== '__placeholder__' && manualValue !== ADD_CATEGORY_BOARD_VALUE
     ? decodeCategoryPath(manualValue)
     : [];
   if (explicitPath.length) {
@@ -5114,6 +5110,7 @@ function moveItemToCategory(itemId, targetCategoryId) {
 
   const source = findItemLocationInBoard(board, itemId);
   if (!source || !source.item || !Array.isArray(source.collection)) return;
+  if (isTotalCostRowItem(source.item)) return;
   if (source.collection === targetCollection) return;
 
   const sourceIdx = source.collection.findIndex((entry) => entry.id === itemId);
@@ -6117,6 +6114,36 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
     void copyCategoryShareLink(getActiveBoard(), categoryPathIds);
   });
 
+  const totalCostActionBtn = document.createElement('button');
+  totalCostActionBtn.type = 'button';
+  totalCostActionBtn.className = 'category-card-delete-action';
+  const totalCostIcon = document.createElement('span');
+  totalCostIcon.className = 'category-card-menu-icon';
+  totalCostIcon.setAttribute('aria-hidden', 'true');
+  totalCostIcon.textContent = '∑';
+  const totalCostText = document.createElement('span');
+  totalCostText.textContent = TOTAL_COST_MENU_LABEL;
+  totalCostActionBtn.appendChild(totalCostIcon);
+  totalCostActionBtn.appendChild(totalCostText);
+  totalCostActionBtn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (!ensureSharedBoardEditAccess('add total cost rows', board)) return;
+    toggleMenu(false);
+    const collection = getEditableCollectionForCategoryNode(categoryNode);
+    if (!Array.isArray(collection)) return;
+    if (findTotalCostRowInCollection(collection)) {
+      setStatus(`Total cost row already exists in ${categoryNode.name || 'category'}.`, false);
+      return;
+    }
+    collection.push(buildTotalCostRowItem());
+    pinTotalCostRowsToEnd(collection);
+    expandedCategoryIds.add(categoryNode.id);
+    lastExpandedCategoryId = categoryNode.id;
+    saveData();
+    renderBoardDetail();
+    setStatus(`Total cost row added to ${categoryNode.name || 'category'}.`, false);
+  });
+
   menuToggleBtn.addEventListener('click', (event) => {
     event.stopPropagation();
     toggleMenu(moreMenu.hidden);
@@ -6127,6 +6154,7 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
   }
   moreMenu.appendChild(shareActionBtn);
   if (canEditContent) {
+    moreMenu.appendChild(totalCostActionBtn);
     moreMenu.appendChild(deleteActionBtn);
   }
   moreWrapper.appendChild(menuToggleBtn);
@@ -6205,17 +6233,10 @@ function renderAddCategoryOptions(board) {
   const previousValue = addCategoryTargetValue;
   const targets = collectCategoryOptionTargets(board);
   addCategorySelect.innerHTML = '';
-  const placeholderOption = document.createElement('option');
-  placeholderOption.value = '__placeholder__';
-  placeholderOption.textContent = 'Category';
-  placeholderOption.disabled = true;
-  placeholderOption.selected = true;
-  placeholderOption.hidden = true;
-  addCategorySelect.appendChild(placeholderOption);
-  const manualOption = document.createElement('option');
-  manualOption.value = '__manual_entry__';
-  manualOption.textContent = 'Manual Entry';
-  addCategorySelect.appendChild(manualOption);
+  const boardOption = document.createElement('option');
+  boardOption.value = ADD_CATEGORY_BOARD_VALUE;
+  boardOption.textContent = String(board?.name || '').trim() || 'Untitled Board';
+  addCategorySelect.appendChild(boardOption);
   for (const target of targets) {
     const opt = document.createElement('option');
     opt.value = encodeCategoryPath(target.pathIds);
@@ -6223,40 +6244,15 @@ function renderAddCategoryOptions(board) {
     opt.textContent = `${indent}${target.label}`;
     addCategorySelect.appendChild(opt);
   }
-  if (previousValue && targets.some((target) => encodeCategoryPath(target.pathIds) === previousValue)) {
+  if (
+    previousValue === ADD_CATEGORY_BOARD_VALUE
+    || (previousValue && targets.some((target) => encodeCategoryPath(target.pathIds) === previousValue))
+  ) {
     addCategorySelect.value = previousValue;
-  } else if (previousValue === '__manual_entry__') {
-    addCategorySelect.value = '__manual_entry__';
   } else {
-    addCategorySelect.value = '__placeholder__';
-    addCategoryTargetValue = '';
+    addCategorySelect.value = ADD_CATEGORY_BOARD_VALUE;
+    addCategoryTargetValue = ADD_CATEGORY_BOARD_VALUE;
   }
-}
-
-function handleManualEntryFromAddDropdown() {
-  const board = getActiveBoard();
-  if (!board) return;
-  if (!ensureSharedBoardEditAccess('add manual entries', board)) return;
-  const activeNode = getActiveCategoryNode(board);
-  const collection = activeNode
-    ? getEditableCollectionForCategoryNode(activeNode)
-    : (Array.isArray(board.items) ? board.items : (board.items = []));
-  if (!Array.isArray(collection)) return;
-
-  const manualItem = buildManualEntryItem();
-  collection.unshift(manualItem);
-  if (activeNode?.id) {
-    expandedCategoryIds.add(activeNode.id);
-    lastExpandedCategoryId = activeNode.id;
-  }
-  activeView = 'list';
-  saveView();
-  saveData();
-  renderBoardDetail();
-  setStatus(`Manual entry row added to ${activeNode?.name || 'board'}.`, false);
-  setTimeout(() => {
-    focusItemNameInlineEditor(manualItem.id);
-  }, 0);
 }
 
 function buildCategoryItemsTable(items, itemCollection, categoryNode = null) {
@@ -6369,9 +6365,32 @@ function buildCategoryItemsReadOnlyTable(items, categoryNode = null) {
 
   const tbody = table.querySelector('tbody');
   if (tbody) {
+    pinTotalCostRowsToEnd(items);
     const customCategories = categories.filter((entry) => !entry.isDefault);
     for (const item of items) {
       const tr = document.createElement('tr');
+      const isTotalCostRow = isTotalCostRowItem(item);
+      if (isTotalCostRow) {
+        tr.innerHTML = `
+          <td><span class="total-cost-placeholder"></span></td>
+          <td class="category-inline-name"><span class="total-cost-label">TOTAL COST</span></td>
+          <td><span class="total-cost-placeholder"></span></td>
+          <td><span class="total-cost-price">${escapeHtml(formatTotalCostForCollection(items, item.id) || '$0.00')}</span></td>
+          <td><span class="total-cost-placeholder"></span></td>
+          <td><span class="total-cost-placeholder"></span></td>
+        `;
+        for (const category of customCategories) {
+          const customCell = document.createElement('td');
+          customCell.className = 'custom-field-cell';
+          customCell.innerHTML = '<span class="total-cost-placeholder"></span>';
+          tr.appendChild(customCell);
+        }
+        tr.classList.add('item-row', 'item-row-total-cost');
+        tr.setAttribute('draggable', 'false');
+        tr.dataset.itemId = item.id;
+        tbody.appendChild(tr);
+        continue;
+      }
       const image = getItemPrimaryImage(item);
       const highlights = normalizeHighlights(item.highlights || []);
       const feedbacks = normalizeFeedbacks(item.feedbacks || []);
@@ -6408,7 +6427,7 @@ function buildCategoryItemsReadOnlyTable(items, categoryNode = null) {
         tr.appendChild(customCell);
       }
       tr.classList.add('item-row');
-      applyFavoriteRankClass(tr, item);
+      if (!isTotalCostRow) applyFavoriteRankClass(tr, item);
       tr.setAttribute('draggable', 'false');
       tr.dataset.itemId = item.id;
       tr.addEventListener('click', (event) => {
@@ -6508,15 +6527,21 @@ function renderItemRows(targetBody, items, options = {}) {
   const categories = Array.isArray(options.fieldCategories) && options.fieldCategories.length
     ? options.fieldCategories
     : getRenderableFieldCategories(board);
+  pinTotalCostRowsToEnd(items);
   for (const item of items) {
+    const isTotalCostRow = isTotalCostRowItem(item);
     const row = document.createElement('tr');
     row.classList.add('item-row');
-    applyFavoriteRankClass(row, item);
-    row.setAttribute('draggable', canEditContent ? 'true' : 'false');
+    if (isTotalCostRow) {
+      row.classList.add('item-row-total-cost');
+      row.dataset.totalCostRow = 'true';
+    }
+    if (!isTotalCostRow) applyFavoriteRankClass(row, item);
+    row.setAttribute('draggable', canEditContent && !isTotalCostRow ? 'true' : 'false');
     row.dataset.itemId = item.id;
 
     row.addEventListener('dragstart', (event) => {
-      if (!canEditContent) {
+      if (!canEditContent || isTotalCostRow) {
         event.preventDefault();
         return;
       }
@@ -6536,6 +6561,13 @@ function renderItemRows(targetBody, items, options = {}) {
 
     row.addEventListener('dragover', (event) => {
       if (!canEditContent) return;
+      if (isTotalCostRow && draggingItemId && draggingItemId !== item.id) {
+        event.preventDefault();
+        event.stopPropagation();
+        row.classList.add('drag-insert-before');
+        row.classList.remove('drag-insert-after');
+        return;
+      }
       const canReorderInPlace = draggingItemId && collectionHasItem(items, draggingItemId);
       if (canReorderInPlace && draggingItemId !== item.id) {
         event.preventDefault();
@@ -6556,7 +6588,7 @@ function renderItemRows(targetBody, items, options = {}) {
       if (!canReorderInPlace || !draggingItemId || draggingItemId === item.id) return;
       event.preventDefault();
       event.stopPropagation();
-      const insertAfter = shouldInsertItemAfter(row, event, 'y');
+      const insertAfter = isTotalCostRow ? false : shouldInsertItemAfter(row, event, 'y');
       row.classList.remove('drag-insert-before', 'drag-insert-after');
       moveItemBeforeFn(draggingItemId, item.id, insertAfter);
     });
@@ -6570,7 +6602,7 @@ function renderItemRows(targetBody, items, options = {}) {
 
     let feedbackCell = null;
     for (const category of categories) {
-      const cell = buildItemCellForCategory(row, item, category, board);
+      const cell = buildItemCellForCategory(row, item, category, board, items);
       if (category.slug === 'feedback') feedbackCell = cell;
       row.appendChild(cell);
     }
@@ -6584,6 +6616,10 @@ function renderItemRows(targetBody, items, options = {}) {
         const feedbackAddBtn = feedbackCell.querySelector('.feedback-add-btn');
         if (feedbackAddBtn) feedbackAddBtn.classList.add('hidden');
       }
+      if (isTotalCostRow) {
+        rowActions.querySelector('.row-rank-btn')?.classList.add('hidden');
+        rowActions.querySelector('.row-open-btn')?.classList.add('hidden');
+      }
       feedbackCell.appendChild(rowActions);
     }
 
@@ -6591,27 +6627,34 @@ function renderItemRows(targetBody, items, options = {}) {
     const rowOpenBtn = row.querySelector('.row-open-btn');
     const rowRemoveBtn = row.querySelector('.row-remove-btn');
     if (rowRankBtn) {
-      rowRankBtn.classList.toggle('hidden', !canShowRankAction);
-      rowRankBtn.classList.toggle('active', Boolean(getItemFavoriteRank(item)));
-      rowRankBtn.addEventListener('click', (event) => {
-        event.stopPropagation();
-        openRankMenu(item.id, rowRankBtn);
-      });
+      rowRankBtn.classList.toggle('hidden', isTotalCostRow || !canShowRankAction);
+      if (!isTotalCostRow) {
+        rowRankBtn.classList.toggle('active', Boolean(getItemFavoriteRank(item)));
+        rowRankBtn.addEventListener('click', (event) => {
+          event.stopPropagation();
+          openRankMenu(item.id, rowRankBtn);
+        });
+      }
     }
     if (rowOpenBtn) {
-      rowOpenBtn.addEventListener('click', (event) => {
-        event.stopPropagation();
-        if (item.url) window.open(item.url, '_blank', 'noopener,noreferrer');
-      });
+      rowOpenBtn.classList.toggle('hidden', isTotalCostRow);
+      if (!isTotalCostRow) {
+        rowOpenBtn.addEventListener('click', (event) => {
+          event.stopPropagation();
+          if (item.url) window.open(item.url, '_blank', 'noopener,noreferrer');
+        });
+      }
     }
     if (rowRemoveBtn) {
       rowRemoveBtn.classList.toggle('hidden', !canEditContent);
       rowRemoveBtn.addEventListener('click', () => removeItemFn(item.id));
     }
-    row.addEventListener('click', (event) => {
-      if (event.target && event.target.closest('button,a,input,textarea')) return;
-      openDetailModal(item.id);
-    });
+    if (!isTotalCostRow) {
+      row.addEventListener('click', (event) => {
+        if (event.target && event.target.closest('button,a,input,textarea')) return;
+        openDetailModal(item.id);
+      });
+    }
 
     targetBody.appendChild(row);
   }
@@ -6633,9 +6676,68 @@ function buildRowActions() {
   return rowActions;
 }
 
-function buildItemCellForCategory(row, item, category, board) {
+function buildTotalCostItemCell(category, collectionItems = [], totalRowId = '') {
+  const cell = document.createElement('td');
+  cell.classList.add('total-cost-cell');
+  if (category.slug === 'image') {
+    cell.classList.add('image-cell');
+    const placeholder = document.createElement('span');
+    placeholder.className = 'total-cost-placeholder';
+    placeholder.textContent = '';
+    cell.appendChild(placeholder);
+    return cell;
+  }
+
+  if (category.slug === 'item_name') {
+    cell.classList.add('name-cell');
+    const label = document.createElement('span');
+    label.className = 'total-cost-label';
+    label.textContent = 'TOTAL COST';
+    cell.appendChild(label);
+    return cell;
+  }
+
+  if (category.slug === 'price') {
+    cell.classList.add('price-cell');
+    const amount = document.createElement('span');
+    amount.className = 'total-cost-price';
+    const computed = formatTotalCostForCollection(collectionItems, totalRowId);
+    amount.textContent = computed || '$0.00';
+    cell.appendChild(amount);
+    return cell;
+  }
+
+  if (category.slug === 'highlights') {
+    cell.classList.add('highlights-cell');
+    const placeholder = document.createElement('span');
+    placeholder.className = 'total-cost-placeholder';
+    placeholder.textContent = '';
+    cell.appendChild(placeholder);
+    return cell;
+  }
+
+  if (category.slug === 'feedback') {
+    cell.classList.add('feedback-cell');
+    const placeholder = document.createElement('span');
+    placeholder.className = 'total-cost-placeholder';
+    placeholder.textContent = '';
+    cell.appendChild(placeholder);
+    return cell;
+  }
+
+  const placeholder = document.createElement('span');
+  placeholder.className = 'total-cost-placeholder';
+  placeholder.textContent = '';
+  cell.appendChild(placeholder);
+  return cell;
+}
+
+function buildItemCellForCategory(row, item, category, board, collectionItems = null) {
   const canEditContent = canEditSharedBoardContent(board);
   const editableTokenClass = canEditContent ? 'editable-token' : 'editable-token is-readonly';
+  if (isTotalCostRowItem(item)) {
+    return buildTotalCostItemCell(category, collectionItems || [], item.id);
+  }
   if (category.slug === 'image') {
     const cell = document.createElement('td');
     cell.className = 'image-cell';
@@ -7509,20 +7611,21 @@ function buildImageItemCard(item, options = {}) {
 }
 
 function buildCategoryItemsImageGrid(items, itemCollection) {
+  const visibleItems = getItemsWithoutTotalCostRows(items);
   const wrap = document.createElement('div');
   wrap.className = 'category-item-image-wrap';
   const grid = document.createElement('div');
   grid.className = 'cards-grid category-item-image-grid';
 
-  for (const item of items) {
+  for (const item of visibleItems) {
     grid.appendChild(buildImageItemCard(item, {
       moveItemBeforeFn: (sourceId, targetId, insertAfter = false) =>
         moveItemBeforeInCollection(itemCollection, sourceId, targetId, insertAfter),
       removeItemFn: (itemId) => removeItemFromCollection(itemCollection, itemId),
-      collectionItems: items
+      collectionItems: visibleItems
     }));
   }
-  wireItemGridDropToEnd(grid, items, (sourceId, targetId, insertAfter = false) =>
+  wireItemGridDropToEnd(grid, visibleItems, (sourceId, targetId, insertAfter = false) =>
     moveItemBeforeInCollection(itemCollection, sourceId, targetId, insertAfter));
 
   wrap.appendChild(grid);
@@ -7530,6 +7633,7 @@ function buildCategoryItemsImageGrid(items, itemCollection) {
 }
 
 function renderImageView(items) {
+  const visibleItems = getItemsWithoutTotalCostRows(items);
   cardsGrid.innerHTML = '';
   const board = getActiveBoard();
   const sharedScope = board ? getActiveSharedCategoryScope(board) : null;
@@ -7547,15 +7651,15 @@ function renderImageView(items) {
     return;
   }
 
-  if (!items.length) {
+  if (!visibleItems.length) {
     cardsGrid.innerHTML = '<p class="empty-cards">No items in this board yet. Paste a link to add one.</p>';
     return;
   }
 
-  for (const item of items) {
-    cardsGrid.appendChild(buildImageItemCard(item, { collectionItems: items }));
+  for (const item of visibleItems) {
+    cardsGrid.appendChild(buildImageItemCard(item, { collectionItems: visibleItems }));
   }
-  wireItemGridDropToEnd(cardsGrid, items, moveItemBefore);
+  wireItemGridDropToEnd(cardsGrid, visibleItems, moveItemBefore);
 }
 
 function moveItemBefore(sourceId, targetId, insertAfter = false) {
@@ -7589,6 +7693,16 @@ function collectionHasItem(items, itemId) {
 
 function moveItemToCollectionEnd(items, sourceId, moveItemBeforeFn) {
   if (!Array.isArray(items) || !items.length || !sourceId || typeof moveItemBeforeFn !== 'function') return;
+  const totalRow = findTotalCostRowInCollection(items);
+  if (totalRow && totalRow.id !== sourceId) {
+    const lastNonTotal = findLastNonTotalCostItem(items, sourceId);
+    if (lastNonTotal?.id) {
+      moveItemBeforeFn(sourceId, lastNonTotal.id, true);
+      return;
+    }
+    moveItemBeforeFn(sourceId, totalRow.id, false);
+    return;
+  }
   const lastEntry = items[items.length - 1];
   if (!lastEntry?.id || lastEntry.id === sourceId) return;
   moveItemBeforeFn(sourceId, lastEntry.id, true);
@@ -7695,6 +7809,7 @@ function moveItemBeforeInCollection(items, sourceId, targetId, insertAfter = fal
   const baseIndex = fromIndex < toIndex ? toIndex - 1 : toIndex;
   const insertIndex = Math.min(Math.max(baseIndex + (insertAfter ? 1 : 0), 0), items.length);
   items.splice(insertIndex, 0, moved);
+  pinTotalCostRowsToEnd(items);
   saveData();
   renderBoardDetail();
 }
@@ -9012,13 +9127,15 @@ function looksLikeProductImage(url) {
     lower.includes('diagram') ||
     lower.includes('line-art') ||
     lower.includes('outline') ||
-    lower.includes('glyph')
+    lower.includes('glyph') ||
+    lower.includes('oldiemessage')
   ) {
     return false;
   }
   try {
     const parsed = new URL(text);
     const path = parsed.pathname.toLowerCase();
+    if (/\/images\/oldiemessage\//i.test(path)) return false;
     if (/\.svg(?:$|\?)/i.test(path)) return false;
     if (/\/(?:icons?|logos?|sprites?|badges?)\//i.test(path)) return false;
     const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
@@ -9624,6 +9741,104 @@ function formatPrice(value) {
   return text;
 }
 
+function isTotalCostRowItem(item) {
+  return Boolean(item?.totalCostRow);
+}
+
+function findTotalCostRowInCollection(collection) {
+  if (!Array.isArray(collection)) return null;
+  return collection.find((entry) => isTotalCostRowItem(entry)) || null;
+}
+
+function findLastNonTotalCostItem(items, excludeId = '') {
+  if (!Array.isArray(items) || !items.length) return null;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const entry = items[index];
+    if (!entry?.id || entry.id === excludeId) continue;
+    if (isTotalCostRowItem(entry)) continue;
+    return entry;
+  }
+  return null;
+}
+
+function pinTotalCostRowsToEnd(items) {
+  if (!Array.isArray(items) || items.length < 2) return;
+  const nonTotal = [];
+  const totalRows = [];
+  for (const entry of items) {
+    if (isTotalCostRowItem(entry)) {
+      totalRows.push(entry);
+      continue;
+    }
+    nonTotal.push(entry);
+  }
+  if (!totalRows.length) return;
+  const next = [...nonTotal, ...totalRows];
+  let changed = next.length !== items.length;
+  if (!changed) {
+    for (let index = 0; index < next.length; index += 1) {
+      if (next[index] !== items[index]) {
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (!changed) return;
+  items.length = 0;
+  items.push(...next);
+}
+
+function getItemsWithoutTotalCostRows(items) {
+  if (!Array.isArray(items)) return [];
+  return items.filter((entry) => !isTotalCostRowItem(entry));
+}
+
+function normalizeCurrencyPrefix(value) {
+  const token = String(value || '').trim().toUpperCase();
+  if (token === 'US$' || token === 'USD' || token === '$') return '$';
+  if (token === 'CA$' || token === 'C$' || token === 'CAD') return 'C$';
+  if (token === 'AU$' || token === 'A$' || token === 'AUD') return 'A$';
+  if (token === 'GBP' || token === '£') return '£';
+  if (token === 'EUR' || token === '€') return '€';
+  return '$';
+}
+
+function getPriceCurrencyPrefix(value) {
+  const formatted = formatPrice(value);
+  if (!formatted) return '$';
+  const leadingMatch = formatted.match(/^(US\$|CA\$|C\$|AU\$|A\$|USD|CAD|AUD|GBP|EUR|\$|£|€)/i);
+  if (!leadingMatch) return '$';
+  return normalizeCurrencyPrefix(leadingMatch[1]);
+}
+
+function parseNumericPriceAmount(value) {
+  const formatted = formatPrice(value);
+  if (!formatted) return null;
+  const amountMatch = formatted.match(/([0-9][0-9,]*(?:\.[0-9]{1,2})?)/);
+  if (!amountMatch) return null;
+  const parsed = Number.parseFloat(amountMatch[1].replace(/,/g, ''));
+  if (!Number.isFinite(parsed)) return null;
+  return parsed;
+}
+
+function formatTotalCostForCollection(collection, excludeItemId = '') {
+  if (!Array.isArray(collection) || !collection.length) return '';
+  let total = 0;
+  let hasAmount = false;
+  let currencyPrefix = '$';
+  for (const entry of collection) {
+    if (!entry || entry.id === excludeItemId || isTotalCostRowItem(entry)) continue;
+    const amount = parseNumericPriceAmount(entry.price);
+    if (!Number.isFinite(amount)) continue;
+    if (!hasAmount) currencyPrefix = getPriceCurrencyPrefix(entry.price);
+    total += amount;
+    hasAmount = true;
+  }
+  if (!hasAmount) return '';
+  const rounded = (Math.round(total * 100) / 100).toFixed(2);
+  return formatPrice(`${currencyPrefix}${rounded}`) || `${currencyPrefix}${rounded}`;
+}
+
 function loadView() {
   try {
     const value = localStorage.getItem(VIEW_STORAGE_KEY);
@@ -9889,5 +10104,31 @@ function buildManualEntryItem() {
     feedbacks: [],
     comments: [],
     manualEntry: true
+  };
+}
+
+function buildTotalCostRowItem() {
+  return {
+    id: crypto.randomUUID(),
+    url: '',
+    brand: '',
+    name: TOTAL_COST_ROW_NAME,
+    image: '',
+    images: [],
+    seller: '',
+    price: '',
+    highlights: [],
+    description: '',
+    dimensions: [],
+    materials: [],
+    specs: [],
+    overview: '',
+    overviewBullets: [],
+    detailSections: [],
+    customFieldValues: {},
+    feedbacks: [],
+    comments: [],
+    manualEntry: false,
+    totalCostRow: true
   };
 }

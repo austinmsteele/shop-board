@@ -50,7 +50,12 @@ const DEFAULT_DEMO_TEMPLATE_SLUG = String(process.env.DEMO_TEMPLATE_DEFAULT_SLUG
 const DEFAULT_DEMO_BOARD_NAME = String(process.env.DEMO_TEMPLATE_BOARD_NAME || 'Demo Renovation Board').trim() || 'Demo Renovation Board';
 const DEMO_TEMPLATE_OWNER_EMAIL = String(process.env.DEMO_TEMPLATE_OWNER_EMAIL || '').trim().toLowerCase();
 const LEGACY_DEMO_TEMPLATE_OWNER_BOARD_NAME = 'Home Reno';
-const DEMO_TEMPLATE_OWNER_BOARD_NAME = String(process.env.DEMO_TEMPLATE_OWNER_BOARD_NAME || 'Home Reno Template').trim() || 'Home Reno Template';
+const DEMO_TEMPLATE_OWNER_BOARD_NAME = String(
+  process.env.DEMO_TEMPLATE_OWNER_BOARD_NAME || LEGACY_DEMO_TEMPLATE_OWNER_BOARD_NAME
+).trim() || LEGACY_DEMO_TEMPLATE_OWNER_BOARD_NAME;
+const DEMO_TEMPLATE_OWNER_TEMPLATE_BOARD_NAME = String(
+  process.env.DEMO_TEMPLATE_OWNER_TEMPLATE_BOARD_NAME || 'Home Reno Template'
+).trim() || 'Home Reno Template';
 const DEMO_TEMPLATE_OWNER_TEMPLATE_SLUG = String(process.env.DEMO_TEMPLATE_OWNER_TEMPLATE_SLUG || DEFAULT_DEMO_TEMPLATE_SLUG).trim() || DEFAULT_DEMO_TEMPLATE_SLUG;
 const DEMO_TEMPLATE_ADMIN_EMAILS = new Set(
   String(process.env.DEMO_TEMPLATE_ADMIN_EMAILS || '')
@@ -878,11 +883,7 @@ function findBoardIdByNames(snapshot, boardNames = []) {
   return '';
 }
 
-function getOwnerTemplateBoardNameCandidates() {
-  const candidates = [
-    DEMO_TEMPLATE_OWNER_BOARD_NAME,
-    LEGACY_DEMO_TEMPLATE_OWNER_BOARD_NAME
-  ];
+function normalizeOwnerBoardNameCandidates(candidates = []) {
   const out = [];
   const seen = new Set();
   for (const rawName of candidates) {
@@ -896,8 +897,34 @@ function getOwnerTemplateBoardNameCandidates() {
   return out;
 }
 
+function getOwnerMasterBoardNameCandidates() {
+  return normalizeOwnerBoardNameCandidates([
+    DEMO_TEMPLATE_OWNER_BOARD_NAME,
+    LEGACY_DEMO_TEMPLATE_OWNER_BOARD_NAME
+  ]);
+}
+
+function getOwnerTemplateBoardNameCandidates() {
+  return normalizeOwnerBoardNameCandidates([
+    DEMO_TEMPLATE_OWNER_TEMPLATE_BOARD_NAME,
+    ...getOwnerMasterBoardNameCandidates()
+  ]);
+}
+
+function getPreferredOwnerMasterBoardName() {
+  return getOwnerMasterBoardNameCandidates()[0] || LEGACY_DEMO_TEMPLATE_OWNER_BOARD_NAME;
+}
+
 function getPreferredOwnerTemplateBoardName() {
   return getOwnerTemplateBoardNameCandidates()[0] || LEGACY_DEMO_TEMPLATE_OWNER_BOARD_NAME;
+}
+
+function getLegacyOwnerTemplateBoardNameCandidates() {
+  const preferredKey = normalizeBoardNameForMatch(getPreferredOwnerTemplateBoardName());
+  return getOwnerTemplateBoardNameCandidates().filter((candidate) => {
+    const key = normalizeBoardNameForMatch(candidate);
+    return Boolean(key && key !== preferredKey);
+  });
 }
 
 function isOwnerTemplateBoardName(value) {
@@ -912,9 +939,9 @@ function tryAutoSyncOwnerTemplateFromSnapshot(db, userId, snapshot) {
   if (!tableExists(db, 'board_templates')) return;
   const ownerEmail = normalizeEmailAddress(DEMO_TEMPLATE_OWNER_EMAIL);
   if (!ownerEmail) return;
-  const ownerBoardNames = getOwnerTemplateBoardNameCandidates();
-  const boardName = ownerBoardNames[0] || '';
-  if (!ownerBoardNames.length || !boardName) return;
+  const ownerBoardNames = getOwnerMasterBoardNameCandidates();
+  const templateBoardName = getPreferredOwnerTemplateBoardName();
+  if (!ownerBoardNames.length || !templateBoardName) return;
 
   const user = readPublicUserById(db, userId);
   if (!user) return;
@@ -926,7 +953,7 @@ function tryAutoSyncOwnerTemplateFromSnapshot(db, userId, snapshot) {
   try {
     upsertBoardTemplateFromSourceBoard(db, {
       templateSlug: DEMO_TEMPLATE_OWNER_TEMPLATE_SLUG,
-      title: boardName,
+      title: templateBoardName,
       sourceBoardId,
       sourceUserId: user.id,
       sourceUserEmail: user.email,
@@ -1000,6 +1027,65 @@ function writeUserSnapshot(db, userId, snapshot) {
   `).run(accountId, JSON.stringify(normalized));
   tryAutoSyncOwnerTemplateFromSnapshot(db, accountId, normalized);
   return normalized;
+}
+
+function normalizeLegacyOwnerTemplateBoardNamesForUser(db, userId, snapshot = null) {
+  const accountId = String(userId || '').trim();
+  if (!accountId) {
+    return {
+      changed: false,
+      snapshot: normalizeAppDataSnapshot(snapshot)
+    };
+  }
+  const user = readPublicUserById(db, accountId);
+  const nextSnapshot = snapshot ? normalizeAppDataSnapshot(snapshot) : readUserSnapshot(db, accountId);
+  const boards = Array.isArray(nextSnapshot?.boards) ? nextSnapshot.boards : [];
+  if (!user || !user.hasSeededDemoBoard || !boards.length) {
+    return { changed: false, snapshot: nextSnapshot };
+  }
+
+  const ownerEmail = normalizeEmailAddress(DEMO_TEMPLATE_OWNER_EMAIL);
+  if (ownerEmail && normalizeEmailAddress(user.email) === ownerEmail) {
+    return { changed: false, snapshot: nextSnapshot };
+  }
+
+  const preferredName = getPreferredOwnerTemplateBoardName();
+  const preferredKey = normalizeBoardNameForMatch(preferredName);
+  if (!preferredName || !preferredKey) {
+    return { changed: false, snapshot: nextSnapshot };
+  }
+  const legacyKeys = new Set(
+    getLegacyOwnerTemplateBoardNameCandidates()
+      .map((name) => normalizeBoardNameForMatch(name))
+      .filter(Boolean)
+  );
+  if (!legacyKeys.size) {
+    return { changed: false, snapshot: nextSnapshot };
+  }
+
+  let changed = false;
+  const normalizedBoards = boards.map((board) => {
+    if (!board || typeof board !== 'object' || Array.isArray(board)) return board;
+    const boardName = String(board.name || '').trim();
+    const boardKey = normalizeBoardNameForMatch(boardName);
+    if (!boardKey || !legacyKeys.has(boardKey)) return board;
+    changed = true;
+    return {
+      ...board,
+      name: preferredName
+    };
+  });
+
+  if (!changed) {
+    return { changed: false, snapshot: nextSnapshot };
+  }
+
+  const normalizedSnapshot = normalizeAppDataSnapshot({ boards: normalizedBoards });
+  writeUserSnapshot(db, accountId, normalizedSnapshot);
+  return {
+    changed: true,
+    snapshot: normalizedSnapshot
+  };
 }
 
 function normalizeTemplateSlug(value, fallback = '') {
@@ -1263,10 +1349,14 @@ function collectCustomValuesFromBoardSnapshot(board, fieldCategories = []) {
 
 function rowToBoardTemplateSummary(row) {
   if (!row) return null;
+  const sourceTitle = String(row.title || '').trim();
+  const title = isOwnerTemplateBoardName(sourceTitle)
+    ? getPreferredOwnerTemplateBoardName()
+    : sourceTitle;
   return {
     id: row.id,
     slug: row.slug,
-    title: row.title,
+    title: title || sourceTitle,
     description: row.description || '',
     templateBoardId: row.template_board_id,
     sourceUserId: row.source_user_id || null,
@@ -1695,7 +1785,12 @@ function upsertBoardTemplateFromSourceBoard(db, options = {}) {
 
   const sourceBoardName = String(sourceBoard?.name || '').trim();
   const requestedTitle = String(options?.title || '').trim();
-  const title = normalizeDemoBoardName(requestedTitle || sourceBoardName || DEFAULT_DEMO_BOARD_NAME);
+  let title = normalizeDemoBoardName(requestedTitle || sourceBoardName || DEFAULT_DEMO_BOARD_NAME);
+  const normalizedTemplateSlug = normalizeTemplateSlug(templateSlug, templateSlug);
+  const ownerTemplateSlug = normalizeTemplateSlug(DEMO_TEMPLATE_OWNER_TEMPLATE_SLUG, DEFAULT_DEMO_TEMPLATE_SLUG);
+  if (normalizedTemplateSlug && ownerTemplateSlug && normalizedTemplateSlug === ownerTemplateSlug && isOwnerTemplateBoardName(title)) {
+    title = getPreferredOwnerTemplateBoardName();
+  }
   const description = String(options?.description || '').trim().slice(0, 500);
   const requestedActive = typeof options?.isActive === 'boolean' ? options.isActive : true;
   const existing = readBoardTemplateBySlug(db, templateSlug, { activeOnly: false });
@@ -1895,7 +1990,7 @@ async function ensureOwnerMasterBoardAttached(db, userId) {
   }
 
   const ownerBoardNames = getOwnerTemplateBoardNameCandidates();
-  const ownerBoardName = ownerBoardNames[0] || getPreferredOwnerTemplateBoardName();
+  const ownerBoardName = getPreferredOwnerMasterBoardName();
   const existingSnapshot = readUserSnapshot(db, normalizedUserId);
   if (findBoardIdByNames(existingSnapshot, ownerBoardNames)) {
     return { attached: false, reason: 'owner-board-exists' };
@@ -2485,7 +2580,8 @@ function looksLikeProductImage(url) {
     lower.includes('line-art') ||
     lower.includes('outline') ||
     lower.includes('glyph') ||
-    lower.includes('payment-credit-card')
+    lower.includes('payment-credit-card') ||
+    lower.includes('oldiemessage')
   ) {
     return false;
   }
@@ -2494,6 +2590,7 @@ function looksLikeProductImage(url) {
     const path = parsed.pathname.toLowerCase();
     const host = parsed.hostname.toLowerCase();
     if (host.includes('contentgrid.thdstatic.com')) return false;
+    if (/\/images\/oldiemessage\//i.test(path)) return false;
     if (/\.svg(?:$|\?)/i.test(path)) return false;
     if (/\/(?:icons?|logos?|sprites?|badges?)\//i.test(path)) return false;
     if (isAmazonHost(parsed.hostname)) {
@@ -4008,6 +4105,11 @@ function shouldAppendBrand({ sellerName = '', brand = '', productTitle = '', con
   return true;
 }
 
+function isBhPhotoSeller(value = '') {
+  const sellerKey = normalizeSellerKey(value);
+  return sellerKey === 'bhphotovideo' || sellerKey === 'bhphoto';
+}
+
 function resolveUnifiedItemNameContext(product, sourceUrl = '') {
   const productTitle = resolvePreferredProductTitle(product, sourceUrl);
   let brand = normalizeBrand(product?.brandRaw || product?.brand || '');
@@ -4054,6 +4156,9 @@ function formatItemName({ productTitle = '', brand = '', sellerName = '', brandC
   // Default format item names as `Product Name by Manufacturer` when the manufacturer is confidently known and not redundant with the seller.
   const cleanTitle = normalizeTitle(productTitle);
   if (!cleanTitle) return '';
+  if (isBhPhotoSeller(sellerName) && shouldPreferFullItemName(cleanTitle)) {
+    return truncateItemName(cleanTitle);
+  }
   const cleanBrand = normalizeBrand(brand);
   const titleWithoutBrand = removeBrandFromTitle(cleanTitle, cleanBrand);
   const compactTitle = compactTitleForBrandDisplay(titleWithoutBrand || cleanTitle);
@@ -5820,6 +5925,7 @@ async function extractViaZyte(targetUrl) {
     },
     body: JSON.stringify({
       url: targetUrl,
+      browserHtml: true,
       product: true,
       productOptions: {
         extractFrom: 'browserHtml'
@@ -6618,6 +6724,11 @@ async function handleExtract(req, res) {
 export function createServer({ databasePath = dbPath } = {}) {
   const db = openDatabase(databasePath);
   const dataService = createBoardDataService(db);
+  const shouldSkipDemoBoardProvisioning = (options = {}) => {
+    const explicitFlag = options?.explicitFlag === true;
+    const hasSharedBoardRequest = Boolean(String(options?.sharedBoardId || '').trim());
+    return explicitFlag || hasSharedBoardRequest;
+  };
 
   const server = http.createServer(async (req, res) => {
     const method = req.method || 'GET';
@@ -6642,10 +6753,12 @@ export function createServer({ databasePath = dbPath } = {}) {
       if (pathname === '/api/auth/sign-up' && method === 'POST') {
         const body = await readJsonBody(req);
         const createdUser = await createAccount(db, body);
-        try {
-          provisionDemoBoardForUser(db, createdUser.id);
-        } catch (error) {
-          console.warn('Could not auto-provision demo board after sign-up:', error);
+        if (!shouldSkipDemoBoardProvisioning({ explicitFlag: body?.skipDemoBoardProvisioning === true })) {
+          try {
+            provisionDemoBoardForUser(db, createdUser.id);
+          } catch (error) {
+            console.warn('Could not auto-provision demo board after sign-up:', error);
+          }
         }
         try {
           const ownerAttachResult = await ensureOwnerMasterBoardAttached(db, createdUser.id);
@@ -6677,10 +6790,12 @@ export function createServer({ databasePath = dbPath } = {}) {
       if (pathname === '/api/auth/sign-in' && method === 'POST') {
         const body = await readJsonBody(req);
         const authenticatedUser = await authenticateAccount(db, body);
-        try {
-          provisionDemoBoardForUser(db, authenticatedUser.id);
-        } catch (error) {
-          console.warn('Could not auto-provision demo board after sign-in:', error);
+        if (!shouldSkipDemoBoardProvisioning({ explicitFlag: body?.skipDemoBoardProvisioning === true })) {
+          try {
+            provisionDemoBoardForUser(db, authenticatedUser.id);
+          } catch (error) {
+            console.warn('Could not auto-provision demo board after sign-in:', error);
+          }
         }
         try {
           const ownerAttachResult = await ensureOwnerMasterBoardAttached(db, authenticatedUser.id);
@@ -6764,9 +6879,16 @@ export function createServer({ databasePath = dbPath } = {}) {
           respondJson(res, 404, { error: 'Template not found.' });
           return;
         }
+        const board = cloneJson(safeJsonParse(template.board_json || '{}', {}), {});
+        if (board && typeof board === 'object' && !Array.isArray(board)) {
+          const boardName = String(board.name || '').trim();
+          if (isOwnerTemplateBoardName(boardName)) {
+            board.name = getPreferredOwnerTemplateBoardName();
+          }
+        }
         respondJson(res, 200, {
           template: rowToBoardTemplateSummary(template),
-          board: cloneJson(safeJsonParse(template.board_json || '{}', {}), {})
+          board
         });
         return;
       }
@@ -6852,10 +6974,12 @@ export function createServer({ databasePath = dbPath } = {}) {
           }
           const authContext = lookupAuthContext(db, req);
           if (authContext.authenticated && authContext.user) {
-            try {
-              provisionDemoBoardForUser(db, authContext.user.id);
-            } catch (error) {
-              console.warn('Could not auto-provision demo board during /api/data load:', error);
+            if (!shouldSkipDemoBoardProvisioning({ sharedBoardId: requestedSharedBoardId })) {
+              try {
+                provisionDemoBoardForUser(db, authContext.user.id);
+              } catch (error) {
+                console.warn('Could not auto-provision demo board during /api/data load:', error);
+              }
             }
             try {
               const ownerAttachResult = await ensureOwnerMasterBoardAttached(db, authContext.user.id);
@@ -6868,7 +6992,7 @@ export function createServer({ databasePath = dbPath } = {}) {
             } catch (error) {
               console.warn('Could not auto-attach owner master board during /api/data load:', error);
             }
-            const userSnapshot = readUserSnapshot(db, authContext.user.id);
+            const { snapshot: userSnapshot } = normalizeLegacyOwnerTemplateBoardNamesForUser(db, authContext.user.id);
             const payload = requestedSharedBoard
               ? mergeSharedBoardIntoSnapshot(userSnapshot, requestedSharedBoard)
               : userSnapshot;
@@ -6879,7 +7003,7 @@ export function createServer({ databasePath = dbPath } = {}) {
           }
           const anonymousSnapshot = await resolveAnonymousSnapshot(db);
           const payload = requestedSharedBoard
-            ? mergeSharedBoardIntoSnapshot(anonymousSnapshot, requestedSharedBoard)
+            ? normalizeAppDataSnapshot({ boards: [requestedSharedBoard] })
             : anonymousSnapshot;
           respondJson(res, 200, payload);
           return;
