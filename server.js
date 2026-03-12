@@ -212,6 +212,22 @@ async function resolveAnonymousSnapshot(db) {
   });
 }
 
+function resolveAnonymousBetaSnapshot(db) {
+  const template = resolveProvisioningTemplate(db, '');
+  if (!template) {
+    return { boards: [] };
+  }
+  const cloned = cloneBoardFromTemplateRecord(template, {
+    boardName: getPreferredOwnerTemplateBoardName()
+  });
+  if (!cloned?.board) {
+    return { boards: [] };
+  }
+  return normalizeAppDataSnapshot({
+    boards: [cloned.board]
+  });
+}
+
 function runMigrations(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -6254,7 +6270,8 @@ async function extractProductData(targetUrl) {
 async function serveStatic(req, res) {
   const parsed = new URL(req.url || '/', 'http://localhost');
   const isShareRoute = /^\/share\/[^/]+\/?$/.test(parsed.pathname);
-  const rawPath = parsed.pathname === '/' || isShareRoute ? '/index.html' : parsed.pathname;
+  const isBetaRoute = /^\/beta\/?$/.test(parsed.pathname);
+  const rawPath = parsed.pathname === '/' || isShareRoute || isBetaRoute ? '/index.html' : parsed.pathname;
   const requestPath = decodeURIComponent(rawPath).replace(/^\/+/, '');
   const filePath = path.join(publicDir, requestPath);
 
@@ -7050,6 +7067,7 @@ export function createServer({ databasePath = dbPath } = {}) {
 
       if (pathname === '/api/data') {
         if (method === 'GET') {
+          const betaAccessRequest = String(parsedUrl.searchParams.get('beta') || '').trim() === '1';
           const requestedSharedBoardId = String(parsedUrl.searchParams.get('board') || '').trim();
           const requestedSharedOwnerId = String(parsedUrl.searchParams.get('owner') || '').trim();
           let requestedSharedBoard = null;
@@ -7089,7 +7107,9 @@ export function createServer({ databasePath = dbPath } = {}) {
           } else if (authContext.sessionToken) {
             appendSetCookieHeader(res, createClearSessionCookie(req));
           }
-          const anonymousSnapshot = await resolveAnonymousSnapshot(db);
+          const anonymousSnapshot = betaAccessRequest
+            ? resolveAnonymousBetaSnapshot(db)
+            : await resolveAnonymousSnapshot(db);
           const payload = requestedSharedBoard
             ? normalizeAppDataSnapshot({ boards: [requestedSharedBoard] })
             : anonymousSnapshot;

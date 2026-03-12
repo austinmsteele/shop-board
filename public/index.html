@@ -111,6 +111,7 @@
               <p class="extracting-subtitle">This may take a minute. You can add another link to the queue.</p>
               <button id="cancel-extract-btn" class="cancel-extract-btn" type="button">Cancel</button>
             </div>
+            <p id="extracting-queue-count" class="extracting-queue-count hidden"></p>
           </section>
         </section>
 
@@ -210,6 +211,17 @@
         <menu>
           <button id="new-board-cancel-btn" type="button" class="cancel-btn">Cancel</button>
           <button id="new-board-save-btn" type="submit">Create</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="beta-create-board-dialog" class="new-board-dialog beta-create-board-dialog">
+      <form method="dialog" class="new-board-form beta-create-board-form">
+        <h2>Create Your Own Board</h2>
+        <p>To create your own board, please create an account.</p>
+        <menu>
+          <button id="beta-create-board-cancel-btn" type="button" class="cancel-btn">Cancel</button>
+          <button id="beta-create-board-sign-up-btn" type="button">Sign Up</button>
         </menu>
       </form>
     </dialog>

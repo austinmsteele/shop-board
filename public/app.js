@@ -5,6 +5,7 @@ const DATA_BACKUP_KEY = 'shopping-organizer-data-v1-backup';
 const DATA_OWNER_KEY = 'shopping-organizer-data-owner-v1';
 const BETA_AUTH_MODE_SIGN_IN = 'sign-in';
 const BETA_AUTH_MODE_SIGN_UP = 'sign-up';
+const BETA_MODE_PATH_PATTERN = /^\/beta\/?$/i;
 const ITEM_NAME_MAX_LENGTH = 200;
 const SHARE_ACCESS_EDIT = 'edit';
 const SHARE_ACCESS_FEEDBACK = 'feedback';
@@ -59,6 +60,7 @@ const boardViewControls = document.querySelector('#board-view-controls');
 const addForm = document.querySelector('#add-form');
 const addItemPanel = document.querySelector('#add-item-panel');
 const extractingOverlay = document.querySelector('#extracting-overlay');
+const extractingQueueCount = document.querySelector('#extracting-queue-count');
 const cancelExtractBtn = document.querySelector('#cancel-extract-btn');
 const addCategorySelect = document.querySelector('#add-category-select');
 const urlInput = document.querySelector('#product-url');
@@ -153,6 +155,9 @@ const newBoardTitle = document.querySelector('#new-board-title');
 const newBoardLabel = document.querySelector('#new-board-label');
 const newBoardInput = document.querySelector('#new-board-input');
 const newBoardCancelBtn = document.querySelector('#new-board-cancel-btn');
+const betaCreateBoardDialog = document.querySelector('#beta-create-board-dialog');
+const betaCreateBoardCancelBtn = document.querySelector('#beta-create-board-cancel-btn');
+const betaCreateBoardSignUpBtn = document.querySelector('#beta-create-board-sign-up-btn');
 const boardEditDialog = document.querySelector('#board-edit-dialog');
 const boardEditForm = document.querySelector('#board-edit-form');
 const boardEditNameInput = document.querySelector('#board-edit-name');
@@ -202,6 +207,7 @@ let data = loadData();
 let activeBoardId = null;
 let activeView = loadView();
 let initialShareIntent = readInitialShareIntent();
+const betaAccessIntent = readBetaAccessIntent();
 let activeSessionUser = null;
 let betaWelcomeGateEnabled = true;
 let betaAuthMode = BETA_AUTH_MODE_SIGN_IN;
@@ -446,6 +452,26 @@ authDialog?.addEventListener('click', (event) => {
 authDialog?.addEventListener('close', () => {
   resetAuthDialogFeedback();
   if (betaAuthPasswordInput) betaAuthPasswordInput.value = '';
+});
+
+betaCreateBoardCancelBtn?.addEventListener('click', () => {
+  if (betaCreateBoardDialog?.open) betaCreateBoardDialog.close();
+});
+
+betaCreateBoardDialog?.addEventListener('click', (event) => {
+  if (event.target === betaCreateBoardDialog) betaCreateBoardDialog.close();
+});
+
+betaCreateBoardSignUpBtn?.addEventListener('click', () => {
+  if (betaCreateBoardDialog?.open) betaCreateBoardDialog.close();
+  promptAuthForAction(
+    'To create your own board, please create an account.',
+    () => {
+      openNewBoardDialog('board');
+    },
+    false,
+    BETA_AUTH_MODE_SIGN_UP
+  );
 });
 
 homeAuthBtn?.addEventListener('click', (event) => {
@@ -885,7 +911,15 @@ function mergeKnownAttributePatterns(text, put) {
 
 function updateExtractionUi() {
   const isExtracting = Boolean(activeExtractionJob);
+  const queuedCount = extractionQueue.length;
   setExtracting(isExtracting);
+  if (extractingQueueCount) {
+    const showQueueCount = isExtracting && queuedCount > 0;
+    extractingQueueCount.classList.toggle('hidden', !showQueueCount);
+    if (showQueueCount) {
+      extractingQueueCount.textContent = `${queuedCount} item${queuedCount === 1 ? '' : 's'} in queue`;
+    }
+  }
 }
 
 editCancelBtn.addEventListener('click', () => {
@@ -1731,8 +1765,8 @@ function closeAuthDialog() {
   resetAuthDialogFeedback();
 }
 
-function openAuthDialog(message = 'Sign in to continue.', isError = false) {
-  setBetaAuthMode(BETA_AUTH_MODE_SIGN_IN);
+function openAuthDialog(message = 'Sign in to continue.', isError = false, authMode = BETA_AUTH_MODE_SIGN_IN) {
+  setBetaAuthMode(authMode);
   setAuthDialogPrompt(message, isError);
   setAuthDialogMessage('');
   if (authDialog && !authDialog.open) authDialog.showModal();
@@ -2122,9 +2156,9 @@ async function enterAppShell() {
   renderApp();
 }
 
-function promptAuthForAction(message = 'Sign in to continue.', onSuccess = null, isError = false) {
+function promptAuthForAction(message = 'Sign in to continue.', onSuccess = null, isError = false, authMode = BETA_AUTH_MODE_SIGN_IN) {
   pendingPostAuthAction = typeof onSuccess === 'function' ? onSuccess : null;
-  openAuthDialog(message, isError);
+  openAuthDialog(message, isError, authMode);
 }
 
 function runPendingPostAuthAction() {
@@ -2265,7 +2299,9 @@ function getCurrentSessionOwnerKey() {
 
 function buildInitialDataHydrationPath() {
   const boardId = String(initialShareIntent?.boardId || '').trim();
-  if (!boardId) return '/api/data';
+  if (!boardId) {
+    return betaAccessIntent ? '/api/data?beta=1' : '/api/data';
+  }
   const params = new URLSearchParams();
   params.set('board', boardId);
   const ownerId = String(initialShareIntent?.ownerId || '').trim();
@@ -4361,6 +4397,16 @@ function readInitialShareIntent() {
   }
 }
 
+function readBetaAccessIntent() {
+  try {
+    const url = new URL(window.location.href);
+    if (String(url.searchParams.get('beta') || '').trim() === '1') return true;
+    return BETA_MODE_PATH_PATTERN.test(String(url.pathname || '').trim());
+  } catch {
+    return false;
+  }
+}
+
 function clearSharedCategoryScope() {
   sharedCategoryScopeBoardId = '';
   sharedCategoryScopePath = [];
@@ -5170,6 +5216,10 @@ function moveCategoryToTopLevelBoard(categoryCollection, categoryNode) {
 function requestBoardCreation() {
   if (activeSessionUser) {
     openNewBoardDialog('board');
+    return;
+  }
+  if (betaAccessIntent) {
+    if (betaCreateBoardDialog && !betaCreateBoardDialog.open) betaCreateBoardDialog.showModal();
     return;
   }
   promptAuthForAction('Sign in or create an account to create your own boards.', () => {
@@ -6272,7 +6322,7 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
   deleteIcon.setAttribute('aria-hidden', 'true');
   deleteIcon.textContent = '🗑';
   const deleteText = document.createElement('span');
-  deleteText.textContent = depth > 0 ? 'Delete Subcategory' : 'Delete category';
+  deleteText.textContent = depth > 0 ? 'Delete Subcategory' : 'Delete Category';
   deleteActionBtn.appendChild(deleteIcon);
   deleteActionBtn.appendChild(deleteText);
   deleteActionBtn.addEventListener('click', (event) => {
@@ -6319,7 +6369,7 @@ function renderCategoryCard(categoryNode, categoryCollection, depth = 0, parentN
   shareIcon.setAttribute('aria-hidden', 'true');
   shareIcon.innerHTML = SHARE_ICON_SVG;
   const shareText = document.createElement('span');
-  shareText.textContent = depth > 0 ? 'Share Subcategory' : 'Share category';
+  shareText.textContent = depth > 0 ? 'Share Subcategory' : 'Share Category';
   shareActionBtn.appendChild(shareIcon);
   shareActionBtn.appendChild(shareText);
   shareActionBtn.addEventListener('click', (event) => {
