@@ -37,6 +37,9 @@ const authDialog = document.querySelector('#auth-dialog');
 const authDialogCloseBtn = document.querySelector('#auth-dialog-close-btn');
 const authDialogMessage = document.querySelector('#auth-dialog-message');
 const betaAuthForm = document.querySelector('#beta-auth-form');
+const betaAuthNameFields = document.querySelector('#beta-auth-name-fields');
+const betaAuthFirstNameInput = document.querySelector('#beta-auth-first-name');
+const betaAuthLastNameInput = document.querySelector('#beta-auth-last-name');
 const betaAuthEmailInput = document.querySelector('#beta-auth-email');
 const betaAuthPasswordInput = document.querySelector('#beta-auth-password');
 const betaAuthSubmitBtn = document.querySelector('#beta-auth-submit');
@@ -1784,6 +1787,18 @@ function setBetaGateMessage(message, isError = false) {
 function setBetaAuthMode(mode) {
   betaAuthMode = mode === BETA_AUTH_MODE_SIGN_UP ? BETA_AUTH_MODE_SIGN_UP : BETA_AUTH_MODE_SIGN_IN;
   const isSignUp = betaAuthMode === BETA_AUTH_MODE_SIGN_UP;
+  if (betaAuthNameFields) {
+    betaAuthNameFields.classList.toggle('hidden', !isSignUp);
+    betaAuthNameFields.setAttribute('aria-hidden', !isSignUp ? 'true' : 'false');
+  }
+  if (betaAuthFirstNameInput) {
+    betaAuthFirstNameInput.required = isSignUp;
+    if (!isSignUp) betaAuthFirstNameInput.value = '';
+  }
+  if (betaAuthLastNameInput) {
+    betaAuthLastNameInput.required = isSignUp;
+    if (!isSignUp) betaAuthLastNameInput.value = '';
+  }
   if (betaAuthPasswordInput) {
     betaAuthPasswordInput.setAttribute('autocomplete', isSignUp ? 'new-password' : 'current-password');
   }
@@ -1817,11 +1832,17 @@ async function handleBetaEnter() {
 }
 
 async function handleBetaAuthSubmit() {
+  const firstName = String(betaAuthFirstNameInput?.value || '').trim();
+  const lastName = String(betaAuthLastNameInput?.value || '').trim();
   const email = String(betaAuthEmailInput?.value || '').trim().toLowerCase();
   const password = String(betaAuthPasswordInput?.value || '');
   const isSignUp = betaAuthMode === BETA_AUTH_MODE_SIGN_UP;
   if (!email || !password) {
     setAuthDialogMessage('Email and password are required.', true);
+    return;
+  }
+  if (isSignUp && (!firstName || !lastName)) {
+    setAuthDialogMessage('First and last name are required.', true);
     return;
   }
 
@@ -1840,6 +1861,11 @@ async function handleBetaAuthSubmit() {
       password,
       skipDemoBoardProvisioning: sharedBoardContextActive
     };
+    if (isSignUp) {
+      payload.firstName = firstName;
+      payload.lastName = lastName;
+      payload.displayName = `${firstName} ${lastName}`.trim();
+    }
     const endpoint = isSignUp ? '/api/auth/sign-up' : '/api/auth/sign-in';
     const response = await fetch(endpoint, {
       method: 'POST',
@@ -4052,8 +4078,17 @@ function getCategoryPreviewImages(categoryNode, limit = Number.POSITIVE_INFINITY
     });
   };
 
-  const allItems = collectAllItemsFromCategory(categoryNode);
-  for (const item of allItems) {
+  const subcategories = getVisibleSubcategories(categoryNode);
+  if (subcategories.length) {
+    for (const subcategory of subcategories) {
+      if (picks.length >= max) break;
+      addPreview(findTopImageItemInCategory(subcategory));
+    }
+    return picks;
+  }
+
+  const ownItems = Array.isArray(categoryNode?.items) ? categoryNode.items : [];
+  for (const item of ownItems) {
     if (picks.length >= max) break;
     addPreview(item);
   }
@@ -4101,6 +4136,20 @@ function findTopItemInCategory(node) {
   const nested = Array.isArray(node.children) ? node.children : [];
   for (const child of nested) {
     const candidate = findTopItemInCategory(child);
+    if (candidate) return candidate;
+  }
+  return null;
+}
+
+function findTopImageItemInCategory(node) {
+  if (!node) return null;
+  const ownItems = Array.isArray(node.items) ? node.items : [];
+  for (const item of ownItems) {
+    if (getItemPrimaryImage(item)) return item;
+  }
+  const nested = Array.isArray(node.children) ? node.children : [];
+  for (const child of nested) {
+    const candidate = findTopImageItemInCategory(child);
     if (candidate) return candidate;
   }
   return null;

@@ -535,6 +535,16 @@
             <button id="beta-tab-sign-up" class="beta-auth-tab" type="button" role="tab" aria-selected="false">Create Account</button>
           </div>
           <form id="beta-auth-form" class="beta-auth-form" autocomplete="off">
+            <div id="beta-auth-name-fields" class="beta-auth-name-fields hidden" aria-hidden="true">
+              <label class="beta-auth-field">
+                First Name
+                <input id="beta-auth-first-name" type="text" maxlength="30" autocomplete="given-name" />
+              </label>
+              <label class="beta-auth-field">
+                Last Name
+                <input id="beta-auth-last-name" type="text" maxlength="30" autocomplete="family-name" />
+              </label>
+            </div>
             <label class="beta-auth-field">
               Email
               <input id="beta-auth-email" type="email" maxlength="320" inputmode="email" autocomplete="email" required />

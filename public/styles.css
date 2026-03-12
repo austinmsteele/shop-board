@@ -225,6 +225,12 @@ body.beta-gate-active {
   gap: 0.72rem;
 }
 
+.beta-auth-name-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.72rem;
+}
+
 .beta-auth-field {
   display: grid;
   gap: 0.42rem;
@@ -344,6 +350,10 @@ body.beta-gate-active {
 
   .beta-auth-tab {
     flex: 1 1 50%;
+  }
+
+  .beta-auth-name-fields {
+    grid-template-columns: 1fr;
   }
 }
 

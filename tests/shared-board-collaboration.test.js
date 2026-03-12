@@ -22,6 +22,8 @@ async function signUpUser(baseUrl, email) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       email,
+      firstName: 'Test',
+      lastName: 'User',
       password: 'StrongPass123!',
       skipDemoBoardProvisioning: true
     })

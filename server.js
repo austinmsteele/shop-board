@@ -605,6 +605,23 @@ function normalizeDisplayName(value, email = '') {
   return text.slice(0, 60);
 }
 
+function normalizePersonNamePart(value, maxLength = 30) {
+  return String(value || '').trim().replace(/\s+/g, ' ').slice(0, maxLength);
+}
+
+function requireFullName(payload = {}) {
+  const firstName = normalizePersonNamePart(payload.firstName);
+  const lastName = normalizePersonNamePart(payload.lastName);
+  if (!firstName || !lastName) {
+    throw new DataError('First and last name are required.', 400);
+  }
+  return {
+    firstName,
+    lastName,
+    displayName: normalizeDisplayName(`${firstName} ${lastName}`.trim())
+  };
+}
+
 function validatePassword(value) {
   const password = String(value || '');
   if (password.length < 8) {
@@ -736,11 +753,11 @@ async function signUpWithSupabase(payload = {}) {
   if (!email) {
     throw new DataError('Enter a valid email address.', 400);
   }
+  const fullName = requireFullName(payload);
   const passwordResult = validatePassword(payload.password);
   if (!passwordResult.valid) {
     throw new DataError(passwordResult.error, 400);
   }
-  const displayName = normalizeDisplayName(payload.displayName || payload.name, email);
   try {
     const result = await requestSupabaseAuth('/auth/v1/signup', {
       method: 'POST',
@@ -748,7 +765,10 @@ async function signUpWithSupabase(payload = {}) {
         email,
         password: passwordResult.password,
         data: {
-          display_name: displayName
+          first_name: fullName.firstName,
+          last_name: fullName.lastName,
+          full_name: fullName.displayName,
+          display_name: fullName.displayName
         }
       }
     });
@@ -2169,18 +2189,18 @@ async function createAccount(db, payload = {}) {
   if (!email) {
     throw new DataError('Enter a valid email address.', 400);
   }
+  const fullName = requireFullName(payload);
   const passwordResult = validatePassword(payload.password);
   if (!passwordResult.valid) {
     throw new DataError(passwordResult.error, 400);
   }
-  const displayName = normalizeDisplayName(payload.displayName || payload.name, email);
   const id = crypto.randomUUID();
   const passwordHash = hashPassword(passwordResult.password);
   try {
     db.prepare(`
       INSERT INTO users (id, email, password_hash, display_name)
       VALUES (?, ?, ?, ?)
-    `).run(id, email, passwordHash, displayName);
+    `).run(id, email, passwordHash, fullName.displayName);
   } catch (error) {
     if (String(error?.message || '').includes('users.email')) {
       authLog('warn', 'sign_up_failed_duplicate_email', {

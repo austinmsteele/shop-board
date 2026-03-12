@@ -92,6 +92,8 @@ test('shared-link sign-up skips demo template seeding and returns only requested
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         email: uniqueEmail,
+        firstName: 'Shared',
+        lastName: 'Viewer',
         password: 'StrongPass123!',
         skipDemoBoardProvisioning: true
       })
@@ -147,6 +149,8 @@ test('legacy seeded Home Reno boards are normalized to Home Reno Template for no
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         email: uniqueEmail,
+        firstName: 'Legacy',
+        lastName: 'Viewer',
         password: 'StrongPass123!',
         skipDemoBoardProvisioning: true
       })
