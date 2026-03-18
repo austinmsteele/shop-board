@@ -188,3 +188,95 @@ test('collectImageCandidatesFromHtml derives B&H fallback image from product URL
     'https://www.bhphotovideo.com/images/fb/amaran_apm022xa10_amaran_cob_200x_s_1753990.jpg'
   );
 });
+
+test('collectImageCandidatesFromHtml prefers IKEA product-matching gallery images over unrelated recommendation images', () => {
+  const baseUrl = 'https://www.ikea.com/us/en/p/fake-table-black-s12345678/';
+  const html = `
+    <html>
+      <head>
+        <meta property="og:image" content="https://www.ikea.com/us/en/images/products/other-table-oak__999999_pe111111_s5.jpg?f=xl" />
+      </head>
+      <body>
+        <img src="https://www.ikea.com/us/en/images/products/other-table-oak__999999_pe111111_s5.jpg?f=xl" />
+        <img src="https://www.ikea.com/us/en/images/products/fake-table-black__1234567_pe222222_s5.jpg?f=xl" />
+        <img src="https://www.ikea.com/us/en/images/products/fake-table-black__1234568_pe333333_s5.jpg?f=xl" />
+      </body>
+    </html>
+  `;
+
+  const images = __testOnlyCollectImageCandidatesFromHtml(baseUrl, html, {}, {});
+  assert.equal(images.length, 2);
+  assert.ok(images.every((url) => url.includes('/images/products/fake-table-black__')));
+});
+
+test('collectImageCandidatesFromHtml keeps only the strongest IKEA slug matches when weaker similar table images exist', () => {
+  const baseUrl = 'https://www.ikea.com/us/en/p/fake-table-black-s12345678/';
+  const html = `
+    <html>
+      <body>
+        <img src="https://www.ikea.com/us/en/images/products/fake-table-black__1234567_pe222222_s5.jpg?f=xl" />
+        <img src="https://www.ikea.com/us/en/images/products/fake-table-black__1234568_pe333333_s5.jpg?f=xl" />
+        <img src="https://www.ikea.com/us/en/images/products/round-table-black__999999_pe444444_s5.jpg?f=xl" />
+      </body>
+    </html>
+  `;
+
+  const images = __testOnlyCollectImageCandidatesFromHtml(baseUrl, html, {}, {});
+  assert.equal(images.length, 2);
+  assert.ok(images.every((url) => url.includes('/images/products/fake-table-black__')));
+});
+
+test('collectImageCandidatesFromHtml for IKEA excludes non-matching room-scene images when no product match exists', () => {
+  const baseUrl = 'https://www.ikea.com/us/en/p/fake-table-black-s12345678/';
+  const html = `
+    <html>
+      <body>
+        <img src="https://www.ikea.com/us/en/images/products/room-scene-table__999999_pe111111_s5.jpg?f=xl" />
+      </body>
+    </html>
+  `;
+
+  const images = __testOnlyCollectImageCandidatesFromHtml(baseUrl, html, {}, {});
+  assert.deepEqual(images, []);
+});
+
+test('collectImageCandidatesFromHtml for IKEA rejects weak token-only image matches', () => {
+  const baseUrl = 'https://www.ikea.com/us/en/p/fake-table-black-s12345678/';
+  const html = `
+    <html>
+      <body>
+        <div class="pipf-page js-product-pip"></div>
+        <img src="https://www.ikea.com/us/en/images/products/modern-table-black__999999_pe111111_s5.jpg?f=xl" />
+      </body>
+    </html>
+  `;
+
+  const images = __testOnlyCollectImageCandidatesFromHtml(baseUrl, html, {}, {});
+  assert.deepEqual(images, []);
+});
+
+test('collectImageCandidatesFromHtml for IKEA prefers product JSON-LD images over unrelated DOM/script images', () => {
+  const baseUrl = 'https://www.ikea.com/us/en/p/fake-table-black-s12345678/';
+  const html = `
+    <html>
+      <body>
+        <img src="https://www.ikea.com/us/en/images/products/other-table-oak__999999_pe111111_s5.jpg?f=xl" />
+        <script>
+          window.__ANY__ = {"media":[
+            "https://www.ikea.com/us/en/images/products/other-table-oak__999999_pe111111_s5.jpg?f=xl"
+          ]};
+        </script>
+      </body>
+    </html>
+  `;
+
+  const jsonLd = {
+    image: 'https://www.ikea.com/us/en/images/products/fake-table-black__1234567_pe222222_s5.jpg?f=xl',
+    images: [
+      'https://www.ikea.com/us/en/images/products/fake-table-black__1234568_pe333333_s5.jpg?f=xl'
+    ]
+  };
+  const images = __testOnlyCollectImageCandidatesFromHtml(baseUrl, html, {}, jsonLd);
+  assert.equal(images.length, 2);
+  assert.ok(images.every((url) => url.includes('/images/products/fake-table-black__')));
+});

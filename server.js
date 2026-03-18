@@ -79,6 +79,14 @@ const OPENAI_ITEM_NAME_MODEL = process.env.OPENAI_ITEM_NAME_MODEL?.trim() || 'gp
 const OPENAI_API_BASE = (process.env.OPENAI_API_BASE || 'https://api.openai.com/v1').replace(/\/+$/, '');
 const OPENAI_ITEM_NAME_TIMEOUT_MS = Math.max(1500, Number(process.env.OPENAI_ITEM_NAME_TIMEOUT_MS || 6000));
 const ITEM_NAME_WORD_LIMIT = 10;
+const RESEND_API_KEY = String(process.env.RESEND_API_KEY || '').trim();
+const FEEDBACK_EMAIL_TO = String(process.env.FEEDBACK_EMAIL_TO || 'austinmsteel@gmail.com').trim() || 'austinmsteel@gmail.com';
+const FEEDBACK_EMAIL_FROM = String(process.env.FEEDBACK_EMAIL_FROM || 'ShopBoard Feedback <onboarding@resend.dev>').trim() || 'ShopBoard Feedback <onboarding@resend.dev>';
+const SITE_FEEDBACK_CATEGORY_OPTIONS = new Map([
+  ['site bug', 'Site bug'],
+  ['new feature', 'New feature'],
+  ['other', 'Other']
+]);
 const BRAND_APPEND_CONFIDENCE_MIN = 0.7;
 const MULTI_BRAND_SELLER_KEYS = new Set([
   'wayfair',
@@ -318,6 +326,126 @@ function readJsonBody(req, maxBytes = 1_000_000) {
     });
     req.on('error', reject);
   });
+}
+
+function createHttpError(message, status = 500) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function normalizeSiteFeedbackCategory(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return SITE_FEEDBACK_CATEGORY_OPTIONS.has(normalized) ? normalized : '';
+}
+
+function normalizeSiteFeedbackMessage(value) {
+  return String(value || '')
+    .replace(/\r\n/g, '\n')
+    .trim()
+    .slice(0, 2_000);
+}
+
+function normalizeSiteFeedbackPageUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    return new URL(raw).toString().slice(0, 500);
+  } catch {
+    return raw.slice(0, 500);
+  }
+}
+
+function collectRequestIp(req) {
+  const forwardedFor = String(req.headers['x-forwarded-for'] || '').trim();
+  if (forwardedFor) {
+    return forwardedFor.split(',')[0]?.trim() || '';
+  }
+  return String(req.socket?.remoteAddress || '').trim();
+}
+
+function normalizeSiteFeedbackSubmission(body = {}, context = {}) {
+  const category = normalizeSiteFeedbackCategory(body?.category);
+  if (!category) {
+    throw createHttpError('Please choose a feedback type.', 400);
+  }
+
+  const message = normalizeSiteFeedbackMessage(body?.message);
+  if (!message) {
+    throw createHttpError('Please enter your feedback message.', 400);
+  }
+
+  return {
+    category,
+    categoryLabel: SITE_FEEDBACK_CATEGORY_OPTIONS.get(category) || 'Other',
+    message,
+    pageUrl: normalizeSiteFeedbackPageUrl(body?.pageUrl),
+    pageTitle: String(body?.pageTitle || '').trim().slice(0, 200),
+    submittedAt: new Date().toISOString(),
+    userAgent: String(context?.userAgent || '').trim().slice(0, 500),
+    ipAddress: String(context?.ipAddress || '').trim().slice(0, 200),
+    user: context?.user
+      ? {
+          id: String(context.user.id || '').trim(),
+          email: String(context.user.email || '').trim(),
+          displayName: String(context.user.displayName || '').trim()
+        }
+      : null
+  };
+}
+
+function formatSiteFeedbackEmailText(submission = {}) {
+  const lines = [
+    `Category: ${submission.categoryLabel || 'Other'}`,
+    `Submitted At: ${submission.submittedAt || ''}`,
+    `Page Title: ${submission.pageTitle || '(not provided)'}`,
+    `Page URL: ${submission.pageUrl || '(not provided)'}`,
+    `User Name: ${submission.user?.displayName || '(anonymous)'}`,
+    `User Email: ${submission.user?.email || '(anonymous)'}`,
+    `User ID: ${submission.user?.id || '(anonymous)'}`,
+    `IP Address: ${submission.ipAddress || '(unavailable)'}`,
+    `User Agent: ${submission.userAgent || '(unavailable)'}`,
+    '',
+    'Message:',
+    submission.message || ''
+  ];
+  return lines.join('\n');
+}
+
+async function sendSiteFeedbackEmail(submission = {}) {
+  if (!RESEND_API_KEY) {
+    throw createHttpError('Feedback email is not configured on the server yet.', 503);
+  }
+
+  let response;
+  try {
+    response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json'
+      },
+      body: JSON.stringify({
+        from: FEEDBACK_EMAIL_FROM,
+        to: [FEEDBACK_EMAIL_TO],
+        subject: `ShopBoard feedback: ${submission.categoryLabel || 'Other'}`,
+        text: formatSiteFeedbackEmailText(submission)
+      })
+    });
+  } catch (error) {
+    console.error('Feedback email request failed:', error);
+    throw createHttpError('Feedback could not be sent right now. Please try again later.', 502);
+  }
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    console.error('Feedback email delivery failed:', {
+      status: response.status,
+      detail: detail.slice(0, 500)
+    });
+    throw createHttpError('Feedback could not be sent right now. Please try again later.', 502);
+  }
 }
 
 function rowToCategory(row) {
@@ -830,6 +958,9 @@ function rowToPublicUser(row) {
     displayName: row.display_name || deriveDisplayNameFromEmail(row.email),
     hasSeenBetaWelcome: Boolean(row.has_seen_beta_welcome),
     betaAccessAcknowledgedAt: row.beta_access_acknowledged_at || null,
+    hasSeenFirstLinkNotice: Boolean(row.has_seen_first_link_notice),
+    firstLinkNoticeEligible: Boolean(row.first_link_notice_eligible),
+    firstLinkNoticeTriggeredAt: row.first_link_notice_triggered_at || null,
     hasSeededDemoBoard: Boolean(row.has_seeded_demo_board),
     demoBoardSeededAt: row.demo_board_seeded_at || null,
     createdAt: row.created_at,
@@ -847,6 +978,9 @@ function readPublicUserById(db, userId) {
       display_name,
       has_seen_beta_welcome,
       beta_access_acknowledged_at,
+      has_seen_first_link_notice,
+      first_link_notice_eligible,
+      first_link_notice_triggered_at,
       has_seeded_demo_board,
       demo_board_seeded_at,
       created_at,
@@ -880,6 +1014,9 @@ function readPublicUserByEmail(db, email) {
       display_name,
       has_seen_beta_welcome,
       beta_access_acknowledged_at,
+      has_seen_first_link_notice,
+      first_link_notice_eligible,
+      first_link_notice_triggered_at,
       has_seeded_demo_board,
       demo_board_seeded_at,
       created_at,
@@ -1014,8 +1151,8 @@ function ensureLocalUserForSupabaseIdentity(db, identity = {}) {
   const displayName = normalizeDisplayName(identity.displayName, normalizedEmail);
   const placeholderPasswordHash = hashPassword(nodeCrypto.randomBytes(24).toString('hex'));
   const insertAccount = db.prepare(`
-    INSERT INTO users (id, email, password_hash, display_name)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO users (id, email, password_hash, display_name, first_link_notice_eligible)
+    VALUES (?, ?, ?, ?, 1)
   `);
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1166,7 +1303,7 @@ function findBoardInSnapshot(snapshot, boardId) {
   return boards.find((entry) => String(entry?.id || '').trim() === normalizedBoardId) || null;
 }
 
-function findBoardInAnyUserSnapshot(db, boardId, ownerUserId = '') {
+function findBoardRecordInAnyUserSnapshot(db, boardId, ownerUserId = '') {
   const normalizedBoardId = String(boardId || '').trim();
   if (!normalizedBoardId) return null;
   const normalizedOwnerId = String(ownerUserId || '').trim();
@@ -1174,39 +1311,73 @@ function findBoardInAnyUserSnapshot(db, boardId, ownerUserId = '') {
 
   if (normalizedOwnerId) {
     const ownerSnapshot = readUserSnapshot(db, normalizedOwnerId);
-    return findBoardInSnapshot(ownerSnapshot, normalizedBoardId);
+    const board = findBoardInSnapshot(ownerSnapshot, normalizedBoardId);
+    return board
+      ? {
+          board,
+          ownerId: normalizedOwnerId
+        }
+      : null;
   }
 
   const rows = db.prepare(`
-    SELECT snapshot_json
+    SELECT user_id, snapshot_json
     FROM user_snapshots
     ORDER BY updated_at DESC
   `).all();
   for (const row of rows) {
     const snapshot = normalizeAppDataSnapshot(safeJsonParse(row?.snapshot_json || '{}', {}));
     const board = findBoardInSnapshot(snapshot, normalizedBoardId);
-    if (board) return board;
+    if (board) {
+      return {
+        board,
+        ownerId: String(row?.user_id || '').trim()
+      };
+    }
   }
   return null;
 }
 
-async function resolveSharedBoardById(db, boardId, ownerUserId = '') {
+function findBoardInAnyUserSnapshot(db, boardId, ownerUserId = '') {
+  return findBoardRecordInAnyUserSnapshot(db, boardId, ownerUserId)?.board || null;
+}
+
+async function resolveSharedBoardRecordById(db, boardId, ownerUserId = '') {
   const normalizedBoardId = String(boardId || '').trim();
   if (!normalizedBoardId) return null;
   const normalizedOwnerId = String(ownerUserId || '').trim();
 
   if (normalizedOwnerId) {
-    const ownerBoard = findBoardInAnyUserSnapshot(db, normalizedBoardId, normalizedOwnerId);
-    if (ownerBoard) return cloneJson(ownerBoard, ownerBoard);
+    const ownerRecord = findBoardRecordInAnyUserSnapshot(db, normalizedBoardId, normalizedOwnerId);
+    if (ownerRecord?.board) {
+      return {
+        board: cloneJson(ownerRecord.board, ownerRecord.board),
+        ownerId: ownerRecord.ownerId
+      };
+    }
   }
 
-  const anyUserBoard = findBoardInAnyUserSnapshot(db, normalizedBoardId);
-  if (anyUserBoard) return cloneJson(anyUserBoard, anyUserBoard);
+  const anyUserRecord = findBoardRecordInAnyUserSnapshot(db, normalizedBoardId);
+  if (anyUserRecord?.board) {
+    return {
+      board: cloneJson(anyUserRecord.board, anyUserRecord.board),
+      ownerId: anyUserRecord.ownerId
+    };
+  }
 
   const anonymousSnapshot = await resolveAnonymousSnapshot(db);
   const anonymousBoard = findBoardInSnapshot(anonymousSnapshot, normalizedBoardId);
-  if (anonymousBoard) return cloneJson(anonymousBoard, anonymousBoard);
+  if (anonymousBoard) {
+    return {
+      board: cloneJson(anonymousBoard, anonymousBoard),
+      ownerId: ''
+    };
+  }
   return null;
+}
+
+async function resolveSharedBoardById(db, boardId, ownerUserId = '') {
+  return resolveSharedBoardRecordById(db, boardId, ownerUserId).then((record) => record?.board || null);
 }
 
 function mergeSharedBoardIntoSnapshot(snapshot, board) {
@@ -2139,6 +2310,9 @@ function lookupAuthContext(db, req) {
       u.display_name,
       u.has_seen_beta_welcome,
       u.beta_access_acknowledged_at,
+      u.has_seen_first_link_notice,
+      u.first_link_notice_eligible,
+      u.first_link_notice_triggered_at,
       u.has_seeded_demo_board,
       u.demo_board_seeded_at,
       u.created_at,
@@ -2198,8 +2372,8 @@ async function createAccount(db, payload = {}) {
   const passwordHash = hashPassword(passwordResult.password);
   try {
     db.prepare(`
-      INSERT INTO users (id, email, password_hash, display_name)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO users (id, email, password_hash, display_name, first_link_notice_eligible)
+      VALUES (?, ?, ?, ?, 1)
     `).run(id, email, passwordHash, fullName.displayName);
   } catch (error) {
     if (String(error?.message || '').includes('users.email')) {
@@ -2240,7 +2414,7 @@ async function authenticateAccount(db, payload = {}) {
     throw new DataError('Email and password are required.', 400);
   }
   const row = db.prepare(`
-    SELECT id, email, display_name, password_hash, has_seen_beta_welcome, beta_access_acknowledged_at, has_seeded_demo_board, demo_board_seeded_at, created_at, updated_at
+    SELECT id, email, display_name, password_hash, has_seen_beta_welcome, beta_access_acknowledged_at, has_seen_first_link_notice, first_link_notice_eligible, first_link_notice_triggered_at, has_seeded_demo_board, demo_board_seeded_at, created_at, updated_at
     FROM users
     WHERE email = ?
   `).get(email);
@@ -2285,6 +2459,47 @@ function markUserBetaWelcomeAcknowledged(db, userId) {
       beta_access_acknowledged_at = COALESCE(beta_access_acknowledged_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
     WHERE id = ?
+  `).run(normalizedUserId);
+  return readPublicUserById(db, normalizedUserId);
+}
+
+function triggerFirstLinkNotice(db, userId) {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) throw new DataError('Invalid account.', 400);
+  const now = new Date().toISOString();
+  const result = db.prepare(`
+    UPDATE users
+    SET
+      first_link_notice_triggered_at = COALESCE(first_link_notice_triggered_at, ?),
+      updated_at = CASE
+        WHEN first_link_notice_eligible = 1
+          AND has_seen_first_link_notice = 0
+          AND first_link_notice_triggered_at IS NULL
+        THEN ?
+        ELSE updated_at
+      END
+    WHERE id = ?
+      AND first_link_notice_eligible = 1
+      AND has_seen_first_link_notice = 0
+      AND first_link_notice_triggered_at IS NULL
+  `).run(now, now, normalizedUserId);
+  return {
+    shouldShowNotice: result.changes > 0,
+    user: readPublicUserById(db, normalizedUserId)
+  };
+}
+
+function acknowledgeFirstLinkNotice(db, userId) {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) throw new DataError('Invalid account.', 400);
+  db.prepare(`
+    UPDATE users
+    SET
+      has_seen_first_link_notice = 1,
+      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    WHERE id = ?
+      AND first_link_notice_triggered_at IS NOT NULL
+      AND has_seen_first_link_notice = 0
   `).run(normalizedUserId);
   return readPublicUserById(db, normalizedUserId);
 }
@@ -2530,6 +2745,9 @@ function scoreJsonLdProductCandidate(candidate, { sourceUrl = '', primaryHeading
   if (overlap) score += Math.min(70, overlap * 16);
 
   if (/\b(related|similar|sponsored|recommended|collection|shop more)\b/i.test(name)) score -= 60;
+  if (isIkeaUrl(sourceUrl) && !isIkeaCandidateRelevant(sourceUrl, { productTitleRaw: name, name })) {
+    score -= 160;
+  }
   return score;
 }
 
@@ -2561,6 +2779,7 @@ function parseJsonLd(html, { sourceUrl = '', primaryHeading = '', pageTitle = ''
     specs: []
   };
   const productCandidates = [];
+  const fallbackImages = [];
 
   for (const script of scripts) {
     const contentMatch = script.match(/<script[^>]*>([\s\S]*?)<\/script>/i);
@@ -2579,13 +2798,10 @@ function parseJsonLd(html, { sourceUrl = '', primaryHeading = '', pageTitle = ''
       const productCandidate = parseJsonLdProductNode(node);
       if (productCandidate) {
         productCandidates.push(productCandidate);
-        if (productCandidate.images.length) {
-          aggregated.images.push(...productCandidate.images);
-        }
         continue;
       }
       const topImage = resolveJsonLdImageCandidate(node.image || node.thumbnailUrl || node.contentUrl || node.url);
-      if (topImage) aggregated.images.push(topImage);
+      if (topImage) fallbackImages.push(topImage);
     }
   }
 
@@ -2604,6 +2820,12 @@ function parseJsonLd(html, { sourceUrl = '', primaryHeading = '', pageTitle = ''
     aggregated.dimensions = normalizeDetailList(selected.dimensions, 8);
     aggregated.materials = normalizeDetailList(selected.materials, 8);
     aggregated.specs = normalizeDetailList(selected.specs, 12);
+    aggregated.images = [
+      ...(Array.isArray(selected.images) ? selected.images : []),
+      selected.image
+    ];
+  } else {
+    aggregated.images = fallbackImages;
   }
 
   aggregated.images = Array.from(
@@ -2734,6 +2956,191 @@ function isLikelyImageResourceUrl(rawUrl) {
     /\.(?:jpe?g|png|webp|avif)(?:$|[?#])/i.test(text) ||
     /\/(?:productimages?|images?)\//i.test(text)
   );
+}
+
+function isIkeaUrl(rawUrl = '') {
+  try {
+    const host = new URL(String(rawUrl || '')).hostname.toLowerCase();
+    return /(^|\.)ikea\.com$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
+function isIkeaProductPathUrl(rawUrl = '') {
+  if (!isIkeaUrl(rawUrl)) return false;
+  try {
+    const parts = String(new URL(String(rawUrl || '')).pathname || '')
+      .split('/')
+      .filter(Boolean)
+      .map((part) => part.toLowerCase());
+    const productIndex = parts.findIndex((part) => part === 'p');
+    return productIndex >= 0 && productIndex + 1 < parts.length;
+  } catch {
+    return false;
+  }
+}
+
+function isIkeaProductImageUrl(rawUrl = '') {
+  try {
+    const parsed = new URL(String(rawUrl || ''));
+    const host = parsed.hostname.toLowerCase();
+    return /(^|\.)ikea\.com$/.test(host) && /\/images\/products\//i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function extractIkeaProductImageTokens(sourceUrl = '') {
+  if (!isIkeaUrl(sourceUrl)) {
+    return {
+      slug: '',
+      articleNumbers: [],
+      slugParts: []
+    };
+  }
+
+  try {
+    const parsed = new URL(sourceUrl);
+    const parts = String(parsed.pathname || '')
+      .split('/')
+      .filter(Boolean)
+      .map((part) => decodeURIComponent(part).trim().toLowerCase());
+    const productIndex = parts.findIndex((part) => part === 'p');
+    const rawSlug = productIndex >= 0 ? String(parts[productIndex + 1] || '') : '';
+    const slug = rawSlug
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    const articleNumbers = Array.from(
+      new Set(
+        [...slug.matchAll(/(?:^|-)(?:s)?(\d{8})(?:-|$)/g)]
+          .map((match) => String(match[1] || '').trim())
+          .filter(Boolean)
+      )
+    );
+    const slugParts = slug
+      .split('-')
+      .map((part) => part.trim())
+      .filter((part) => /^[a-z]{3,}$/.test(part));
+    return {
+      slug,
+      articleNumbers,
+      slugParts
+    };
+  } catch {
+    return {
+      slug: '',
+      articleNumbers: [],
+      slugParts: []
+    };
+  }
+}
+
+function scoreIkeaProductImageMatch(sourceUrl = '', imageUrl = '') {
+  const tokens = extractIkeaProductImageTokens(sourceUrl);
+  if (!tokens.slug && !tokens.articleNumbers.length) return 0;
+  const identityTokens = extractIkeaIdentityTokens(sourceUrl);
+
+  try {
+    const parsed = new URL(String(imageUrl || ''));
+    const host = parsed.hostname.toLowerCase();
+    const path = parsed.pathname.toLowerCase();
+    if (!/(^|\.)ikea\.com$/.test(host)) return 0;
+    if (!/\/images\/products\//i.test(path)) return 0;
+
+    const normalizedPath = path.replace(/[^a-z0-9/._-]+/g, '-');
+    let score = 0;
+    if (tokens.slug) {
+      if (
+        normalizedPath.includes(`/${tokens.slug}__`) ||
+        normalizedPath.includes(`/${tokens.slug}_`) ||
+        normalizedPath.includes(`/${tokens.slug}.`) ||
+        normalizedPath.includes(`/${tokens.slug}-`)
+      ) {
+        score = Math.max(score, 90);
+      }
+    }
+
+    for (const articleNumber of tokens.articleNumbers) {
+      if (normalizedPath.includes(articleNumber)) score = Math.max(score, 80);
+    }
+
+    if (identityTokens.length) {
+      const matchedIdentity = identityTokens.filter((part) => normalizedPath.includes(part));
+      if (matchedIdentity.length >= 2) score = Math.max(score, 70);
+      if (matchedIdentity.length && matchedIdentity.includes(identityTokens[0])) score = Math.max(score, 60);
+    }
+
+    if (tokens.slugParts.length >= 3) {
+      const matchedParts = tokens.slugParts.filter((part) => normalizedPath.includes(part));
+      if (matchedParts.length >= 3) score = Math.max(score, 50);
+      else if (matchedParts.length >= 2) score = Math.max(score, 40);
+    }
+    return score;
+  } catch {
+    return 0;
+  }
+
+  return 0;
+}
+
+function filterIkeaProductImages(sourceUrl = '', imageUrls = []) {
+  if (!isIkeaUrl(sourceUrl)) return Array.isArray(imageUrls) ? imageUrls : [];
+  const tokens = extractIkeaProductImageTokens(sourceUrl);
+  if (!tokens.slug && !tokens.articleNumbers.length) return [];
+  const normalized = (Array.isArray(imageUrls) ? imageUrls : [])
+    .map((entry) => normalizeImageCandidateUrl(entry))
+    .filter((entry) => isIkeaProductImageUrl(entry));
+  const scored = normalized
+    .map((imageUrl) => ({
+      imageUrl,
+      score: scoreIkeaProductImageMatch(sourceUrl, imageUrl)
+    }))
+    .filter((entry) => entry.score >= 60);
+  const bestScore = scored.reduce((max, entry) => Math.max(max, entry.score), 0);
+  const filtered = scored
+    .filter((entry) => entry.score === bestScore)
+    .map((entry) => entry.imageUrl);
+  if (filtered.length) return filtered;
+  return [];
+}
+
+function extractIkeaIdentityTokens(sourceUrl = '') {
+  const { slugParts } = extractIkeaProductImageTokens(sourceUrl);
+  if (!slugParts.length) return [];
+  const genericParts = new Set([
+    'table', 'tables', 'desk', 'desks', 'chair', 'chairs', 'stool', 'stools', 'bench', 'benches',
+    'cabinet', 'cabinets', 'shelf', 'shelves', 'bookcase', 'bookcases', 'bed', 'beds', 'frame', 'frames',
+    'sofa', 'sofas', 'lamp', 'lamps', 'storage', 'unit', 'units', 'side', 'coffee', 'dining', 'console',
+    'tv', 'media', 'nightstand', 'outdoor', 'indoor', 'round', 'square', 'rectangular', 'oak', 'pine',
+    'veneer', 'white', 'black', 'brown', 'gray', 'grey', 'green', 'blue', 'red', 'yellow', 'dark', 'light'
+  ]);
+  const identity = [];
+  for (const part of slugParts) {
+    if (genericParts.has(part)) {
+      if (identity.length) break;
+      continue;
+    }
+    identity.push(part);
+    if (identity.length >= 3) break;
+  }
+  return identity.length ? identity : slugParts.slice(0, Math.min(2, slugParts.length));
+}
+
+function isIkeaCandidateRelevant(sourceUrl = '', candidate = {}) {
+  if (!isIkeaUrl(sourceUrl)) return true;
+  const identityTokens = extractIkeaIdentityTokens(sourceUrl);
+  if (!identityTokens.length) return true;
+  const candidateName = `${String(candidate?.productTitleRaw || '')} ${String(candidate?.name || '')}`
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!candidateName) return false;
+  const matched = identityTokens.filter((token) => candidateName.includes(token));
+  if (!matched.length) return false;
+  return matched.includes(identityTokens[0]) || matched.length >= 2;
 }
 
 function isLikelyLowResThumbnail(rawUrl) {
@@ -2958,6 +3365,152 @@ function extractPriceCandidatesFromHtml(html) {
   return out;
 }
 
+function extractIkeaPrimaryHtmlSlice(html = '') {
+  const text = String(html || '');
+  if (!text) return '';
+  const lower = text.toLowerCase();
+  const markers = [
+    'article number',
+    'product details',
+    'measurements',
+    'good to know',
+    'materials and care'
+  ];
+  const indices = markers
+    .map((marker) => lower.indexOf(marker))
+    .filter((index) => Number.isInteger(index) && index > 1200);
+  const cutoff = indices.length ? Math.min(...indices) : Math.min(text.length, 45_000);
+  return text.slice(0, Math.max(0, cutoff));
+}
+
+function parseIkeaUtagData(html = '') {
+  const text = String(html || '');
+  if (!text) return null;
+  const scriptMatch = text.match(
+    /<script[^>]*data-type=["']utag-data["'][^>]*>\s*var\s+utag_data\s*=\s*(\{[\s\S]*?\})\s*;?\s*<\/script>/i
+  );
+  if (scriptMatch?.[1]) return safeJsonParse(scriptMatch[1], null);
+  const fallbackMatch = text.match(/var\s+utag_data\s*=\s*(\{[\s\S]*?\})\s*;?\s*<\/script>/i);
+  if (fallbackMatch?.[1]) return safeJsonParse(fallbackMatch[1], null);
+  return null;
+}
+
+function normalizeIkeaArticleNumber(value = '') {
+  const digits = String(value || '').replace(/[^0-9]/g, '');
+  return digits.length === 8 ? digits : '';
+}
+
+function extractIkeaUtagPrice(html = '', sourceUrl = '') {
+  const text = String(html || '');
+  if (!text || !isIkeaProductPathUrl(sourceUrl)) return '';
+  const utagData = parseIkeaUtagData(text);
+  const sourceArticleNumbers = extractIkeaProductImageTokens(sourceUrl)
+    .articleNumbers
+    .map((entry) => normalizeIkeaArticleNumber(entry))
+    .filter(Boolean);
+  const toArray = (value) => {
+    if (Array.isArray(value)) return value;
+    if (typeof value === 'string' || typeof value === 'number') return [value];
+    return [];
+  };
+  if (utagData && typeof utagData === 'object') {
+    const productIds = toArray(utagData.product_ids).map((entry) => normalizeIkeaArticleNumber(entry)).filter(Boolean);
+    const productPrices = toArray(utagData.product_prices).map((entry) => String(entry || '').trim());
+    for (const sourceArticleNumber of sourceArticleNumbers) {
+      const index = productIds.findIndex((entry) => entry === sourceArticleNumber);
+      if (index >= 0) {
+        const matchedPrice = normalizePrice(productPrices[index]);
+        if (matchedPrice) return matchedPrice;
+      }
+    }
+    if (productIds.length === 1 && productPrices.length === 1) {
+      const singlePrice = normalizePrice(productPrices[0]);
+      if (singlePrice) return singlePrice;
+    }
+  }
+  const match = text.match(/"product_prices"\s*:\s*\[\s*"([0-9]+(?:\.[0-9]{1,2})?)"\s*]/i);
+  if (!match?.[1]) return '';
+  return normalizePrice(match[1]);
+}
+
+function extractIkeaDataProductPrice(html = '', sourceUrl = '') {
+  const text = String(html || '');
+  if (!text || !isIkeaProductPathUrl(sourceUrl)) return '';
+
+  const sourceArticleNumbers = extractIkeaProductImageTokens(sourceUrl)
+    .articleNumbers
+    .map((entry) => normalizeIkeaArticleNumber(entry))
+    .filter(Boolean);
+  const preferredArticleSet = new Set(sourceArticleNumbers);
+
+  const candidates = [];
+  const collectCandidate = (articleRaw = '', priceRaw = '') => {
+    const articleNumber = normalizeIkeaArticleNumber(articleRaw);
+    const normalizedPrice = normalizePrice(priceRaw);
+    if (!normalizedPrice) return '';
+    if (articleNumber && preferredArticleSet.size && preferredArticleSet.has(articleNumber)) {
+      return normalizedPrice;
+    }
+    candidates.push({ articleNumber, price: normalizedPrice });
+    return '';
+  };
+
+  let match;
+  const noThenPricePattern = /data-product-no="([^"]+)"[^>]*data-product-price="([^"]+)"/gi;
+  while ((match = noThenPricePattern.exec(text)) !== null) {
+    const preferred = collectCandidate(match[1], match[2]);
+    if (preferred) return preferred;
+  }
+  const priceThenNoPattern = /data-product-price="([^"]+)"[^>]*data-product-no="([^"]+)"/gi;
+  while ((match = priceThenNoPattern.exec(text)) !== null) {
+    const preferred = collectCandidate(match[2], match[1]);
+    if (preferred) return preferred;
+  }
+
+  if (candidates.length) return candidates[0].price;
+
+  const srTextMatch = text.match(/pipcom-price__sr-text[^>]*>\s*Price\s*\$?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
+  if (!srTextMatch?.[1]) return '';
+  return normalizePrice(srTextMatch[1]);
+}
+
+function isIkeaLikelyProductPageHtml(html = '', sourceUrl = '') {
+  if (!isIkeaProductPathUrl(sourceUrl)) return false;
+  const text = String(html || '');
+  if (!text) return false;
+  const sourceArticleNumbers = extractIkeaProductImageTokens(sourceUrl)
+    .articleNumbers
+    .map((entry) => normalizeIkeaArticleNumber(entry))
+    .filter(Boolean);
+  const utagData = parseIkeaUtagData(text);
+  if (utagData && typeof utagData === 'object' && sourceArticleNumbers.length) {
+    const utagIds = (Array.isArray(utagData.product_ids) ? utagData.product_ids : [utagData.product_ids])
+      .map((entry) => normalizeIkeaArticleNumber(entry))
+      .filter(Boolean);
+    if (sourceArticleNumbers.some((entry) => utagIds.includes(entry))) return true;
+  }
+  for (const articleNumber of sourceArticleNumbers) {
+    if (!articleNumber) continue;
+    const dotted = articleNumber.replace(/^(\d{3})(\d{3})(\d{2})$/, '$1.$2.$3');
+    const spaced = articleNumber.replace(/^(\d{3})(\d{3})(\d{2})$/, '$1 $2 $3');
+    if (new RegExp(articleNumber, 'i').test(text)) return true;
+    if (new RegExp(dotted.replace(/\./g, '\\.'), 'i').test(text)) return true;
+    if (new RegExp(spaced.replace(/\s+/g, '\\s+'), 'i').test(text)) return true;
+  }
+  if (/data-product-no=/i.test(text) && /data-product-price=/i.test(text)) return true;
+  if (/pipf-page[^>]*js-product-pip/i.test(text)) return true;
+  if (/id="pip-range-json-ld"/i.test(text)) return true;
+  if (/"page_type"\s*:\s*"product information page"/i.test(text)) return true;
+  if (/<meta[^>]*property=["']og:type["'][^>]*content=["']product["']/i.test(text)) return true;
+  if (/<script[^>]*type=["']application\/ld\+json["'][^>]*>[\s\S]*?"@type"\s*:\s*"?Product"?[\s\S]*?<\/script>/i.test(text)) {
+    return true;
+  }
+  if (/article number/i.test(text) && /<h1[\s>]/i.test(text)) return true;
+  const ikeaProductImageMatches = text.match(/https?:\/\/[^"'\s<>()]*\/images\/products\/[^"'\s<>()]+/gi) || [];
+  if (ikeaProductImageMatches.some((entry) => scoreIkeaProductImageMatch(sourceUrl, entry) >= 60)) return true;
+  return false;
+}
+
 function chooseBestPriceCandidate(candidates) {
   const deduped = new Map();
   for (const candidate of Array.isArray(candidates) ? candidates : []) {
@@ -2978,6 +3531,27 @@ function chooseBestPriceCandidate(candidates) {
 function pickBestProductPrice({ finalUrl = '', html = '', meta = {}, jsonLd = {} } = {}) {
   const candidates = [];
   const currency = meta['product:price:currency'] || meta['og:price:currency'] || meta.pricecurrency || '';
+  const ikeaSource = isIkeaUrl(finalUrl);
+  const ikeaProductPath = isIkeaProductPathUrl(finalUrl);
+  const ikeaProductHtml = isIkeaLikelyProductPageHtml(html, finalUrl);
+
+  // IKEA pricing priority (most stable to least for this scraper):
+  // 1) data-product-price on the PIP root node (matches what users see on page)
+  // 2) Product JSON-LD offer price
+  // 3) utag product_prices mapped by article number
+  if (ikeaSource) {
+    if (!ikeaProductPath || !ikeaProductHtml) return '';
+    const ikeaDataProductPrice = extractIkeaDataProductPrice(html, finalUrl);
+    if (ikeaDataProductPrice) return ikeaDataProductPrice;
+    const ikeaJsonLdRelevant = isIkeaCandidateRelevant(finalUrl, {
+      productTitleRaw: jsonLd.name,
+      name: jsonLd.name
+    });
+    const ikeaJsonLdPrice = ikeaJsonLdRelevant ? normalizePrice(jsonLd.price) : '';
+    if (ikeaJsonLdPrice) return ikeaJsonLdPrice;
+    const ikeaUtagPrice = extractIkeaUtagPrice(html, finalUrl);
+    if (ikeaUtagPrice) return ikeaUtagPrice;
+  }
 
   addPriceCandidate(candidates, {
     raw: jsonLd.price,
@@ -3033,6 +3607,15 @@ function pickBestProductPrice({ finalUrl = '', html = '', meta = {}, jsonLd = {}
   }
 
   candidates.push(...extractPriceCandidatesFromHtml(html));
+  if (ikeaSource) {
+    for (const candidate of extractPriceCandidatesFromHtml(extractIkeaPrimaryHtmlSlice(html))) {
+      candidates.push({
+        ...candidate,
+        score: candidate.score + 26,
+        source: `${candidate.source}_ikea_primary`
+      });
+    }
+  }
   const best = chooseBestPriceCandidate(candidates);
   return best?.price || '';
 }
@@ -3460,11 +4043,15 @@ function collectImageCandidatesFromHtml(baseUrl, html, meta = {}, jsonLd = {}) {
   const isAmazon = isAmazonUrl(baseUrl);
   const isHomeDepot = isHomeDepotUrl(baseUrl);
   const isBhPhoto = isBhPhotoUrl(baseUrl);
+  const isIkea = isIkeaUrl(baseUrl);
+  const isIkeaProductPath = isIkea ? isIkeaProductPathUrl(baseUrl) : false;
+  const isIkeaProductHtml = isIkea ? isIkeaLikelyProductPageHtml(html, baseUrl) : false;
   const push = (candidate) => {
     if (!candidate) return;
     const url = absoluteUrl(baseUrl, candidate);
     if (!/^https?:\/\//i.test(url)) return;
     if (!looksLikeProductImage(url)) return;
+    if (isIkea && !isIkeaProductImageUrl(url)) return;
     out.push(url);
   };
 
@@ -3477,6 +4064,21 @@ function collectImageCandidatesFromHtml(baseUrl, html, meta = {}, jsonLd = {}) {
   push(meta['twitter:image']);
   push(meta['og:image:url']);
   push(meta['twitter:image:src']);
+
+  if (isIkea) {
+    // IKEA's product JSON-LD is highly reliable; prefer it over broad DOM/script crawling.
+    const structuredImages = dedupeImageUrls(
+      filterIkeaProductImages(baseUrl, [
+        jsonLd.image,
+        ...(Array.isArray(jsonLd.images) ? jsonLd.images : []),
+        meta['og:image'],
+        meta['twitter:image']
+      ]),
+      30
+    );
+    if (structuredImages.length) return structuredImages;
+    if (!isIkeaProductPath || !isIkeaProductHtml) return [];
+  }
 
   if (isAmazon) {
     const galleryImages = extractAmazonProductGalleryImages(baseUrl, html);
@@ -3525,6 +4127,10 @@ function collectImageCandidatesFromHtml(baseUrl, html, meta = {}, jsonLd = {}) {
     }
   }
 
+  const deduped = dedupeImageUrls(out, 30);
+  if (isIkea) {
+    return dedupeImageUrls(filterIkeaProductImages(baseUrl, deduped), 30);
+  }
   return dedupeImageUrls(out, 30);
 }
 
@@ -5702,9 +6308,12 @@ function generateHighlights({ name, descriptionText, specs = [], categoryHint = 
   return output;
 }
 
-function mergeProducts(base, candidate) {
+function mergeProducts(base, candidate, sourceUrl = '') {
   const merged = { ...base };
   if (!candidate) return merged;
+  if (isIkeaUrl(sourceUrl) && !isWeakName(merged.name) && !isIkeaCandidateRelevant(sourceUrl, candidate)) {
+    return merged;
+  }
 
   const mergedImages = dedupeImageUrls(
     [
@@ -5783,13 +6392,16 @@ function needsEnrichment(product) {
 
 function sanitizeProduct(product, sourceUrl) {
   const sanitized = { ...product };
-  const imageList = dedupeImageUrls(
+  const dedupedImageList = dedupeImageUrls(
     [
       ...(Array.isArray(sanitized.images) ? sanitized.images : []),
       sanitized.image
     ],
     30
   );
+  const imageList = isIkeaUrl(sourceUrl)
+    ? dedupeImageUrls(filterIkeaProductImages(sourceUrl, dedupedImageList), 30)
+    : dedupedImageList;
   sanitized.images = imageList;
   const sanitizedImageKey = canonicalImageKey(sanitized.image);
   const matchedFeatured = sanitizedImageKey
@@ -6228,7 +6840,7 @@ async function enrichProductData(targetUrl, baseProduct) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         const candidate = await extractViaZyte(targetUrl);
-        product = mergeProducts(product, candidate);
+        product = mergeProducts(product, candidate, targetUrl);
         if (hasStrongRetailerResult(product) || !needsEnrichment(product)) {
           return product;
         }
@@ -6243,7 +6855,7 @@ async function enrichProductData(targetUrl, baseProduct) {
       if (!needsEnrichment(product)) break;
       try {
         const candidate = await fallback(targetUrl);
-        product = mergeProducts(product, candidate);
+        product = mergeProducts(product, candidate, targetUrl);
       } catch {
         // Ignore this fallback and continue.
       }
@@ -6264,7 +6876,7 @@ async function enrichProductData(targetUrl, baseProduct) {
     if (!needsEnrichment(product)) break;
     try {
       const candidate = await fallback(targetUrl);
-      product = mergeProducts(product, candidate);
+      product = mergeProducts(product, candidate, targetUrl);
     } catch {
       // Ignore this fallback and continue to the next provider.
     }
@@ -6667,6 +7279,10 @@ export function __testOnlyShouldRejectSparseRetailerProduct(product = {}, source
   return shouldRejectSparseRetailerProduct(product, sourceUrl);
 }
 
+export function __testOnlyMergeProducts(base, candidate, sourceUrl = '') {
+  return mergeProducts(base, candidate, sourceUrl);
+}
+
 export async function __testOnlyRunFullExtraction(url) {
   const normalizedUrl = normalizeIncomingUrl(url);
   if (!normalizedUrl) {
@@ -6709,7 +7325,7 @@ export async function __testOnlyDebugExtractionStages(url) {
       };
     }
   })();
-  const mergedWithZyte = mergeProducts(base, zyte);
+  const mergedWithZyte = mergeProducts(base, zyte, normalizedUrl);
   const sanitized = sanitizeProduct(mergedWithZyte, normalizedUrl);
   return {
     base: {
@@ -6846,7 +7462,7 @@ async function handleExtract(req, res) {
   }
 }
 
-export function createServer({ databasePath = dbPath } = {}) {
+export function createServer({ databasePath = dbPath, feedbackSender = sendSiteFeedbackEmail } = {}) {
   const db = openDatabase(databasePath);
   const dataService = createBoardDataService(db);
   const shouldSkipDemoBoardProvisioning = (options = {}) => {
@@ -6861,6 +7477,22 @@ export function createServer({ databasePath = dbPath } = {}) {
     const pathname = parsedUrl.pathname;
 
     try {
+      if (pathname === '/api/feedback' && method === 'POST') {
+        const authContext = lookupAuthContext(db, req);
+        if (!authContext.authenticated && authContext.sessionToken) {
+          appendSetCookieHeader(res, createClearSessionCookie(req));
+        }
+        const body = await readJsonBody(req);
+        const submission = normalizeSiteFeedbackSubmission(body, {
+          user: authContext.authenticated ? authContext.user : null,
+          userAgent: req.headers['user-agent'],
+          ipAddress: collectRequestIp(req)
+        });
+        await feedbackSender(submission);
+        respondJson(res, 202, { ok: true });
+        return;
+      }
+
       if (pathname === '/api/auth/session' && method === 'GET') {
         const authContext = lookupAuthContext(db, req);
         if (!authContext.authenticated && authContext.sessionToken) {
@@ -6989,6 +7621,29 @@ export function createServer({ databasePath = dbPath } = {}) {
         return;
       }
 
+      if (pathname === '/api/first-link-notice/trigger' && method === 'POST') {
+        const user = requireAuthenticatedUser();
+        if (!user) return;
+        const result = triggerFirstLinkNotice(db, user.id);
+        respondJson(res, 200, {
+          ok: true,
+          shouldShowNotice: result.shouldShowNotice,
+          user: result.user
+        });
+        return;
+      }
+
+      if (pathname === '/api/first-link-notice/acknowledge' && method === 'POST') {
+        const user = requireAuthenticatedUser();
+        if (!user) return;
+        const updatedUser = acknowledgeFirstLinkNotice(db, user.id);
+        respondJson(res, 200, {
+          ok: true,
+          user: updatedUser
+        });
+        return;
+      }
+
       if (pathname === '/api/demo/templates' && method === 'GET') {
         respondJson(res, 200, {
           templates: listActiveBoardTemplateSummaries(db)
@@ -7076,12 +7731,15 @@ export function createServer({ databasePath = dbPath } = {}) {
           respondJson(res, 400, { error: 'Board id is required.' });
           return;
         }
-        const sharedBoard = await resolveSharedBoardById(db, boardId, ownerUserId);
-        if (!sharedBoard) {
+        const sharedBoardRecord = await resolveSharedBoardRecordById(db, boardId, ownerUserId);
+        if (!sharedBoardRecord?.board) {
           respondJson(res, 404, { error: 'Shared board not found.' });
           return;
         }
-        respondJson(res, 200, { board: sharedBoard });
+        respondJson(res, 200, {
+          board: sharedBoardRecord.board,
+          ownerId: sharedBoardRecord.ownerId
+        });
         return;
       }
 
@@ -7090,14 +7748,16 @@ export function createServer({ databasePath = dbPath } = {}) {
           const betaAccessRequest = String(parsedUrl.searchParams.get('beta') || '').trim() === '1';
           const requestedSharedBoardId = String(parsedUrl.searchParams.get('board') || '').trim();
           const requestedSharedOwnerId = String(parsedUrl.searchParams.get('owner') || '').trim();
-          let requestedSharedBoard = null;
+          let requestedSharedBoardRecord = null;
           if (requestedSharedBoardId) {
             try {
-              requestedSharedBoard = await resolveSharedBoardById(db, requestedSharedBoardId, requestedSharedOwnerId);
+              requestedSharedBoardRecord = await resolveSharedBoardRecordById(db, requestedSharedBoardId, requestedSharedOwnerId);
             } catch (error) {
               console.warn('Could not resolve requested shared board during /api/data load:', error);
             }
           }
+          const requestedSharedBoard = requestedSharedBoardRecord?.board || null;
+          const requestedSharedBoardOwnerId = String(requestedSharedBoardRecord?.ownerId || '').trim();
           const authContext = lookupAuthContext(db, req);
           if (authContext.authenticated && authContext.user) {
             if (!shouldSkipDemoBoardProvisioning({ sharedBoardId: requestedSharedBoardId })) {
@@ -7122,7 +7782,10 @@ export function createServer({ databasePath = dbPath } = {}) {
             const payload = requestedSharedBoard
               ? mergeSharedBoardIntoSnapshot(userSnapshot, requestedSharedBoard)
               : userSnapshot;
-            respondJson(res, 200, payload);
+            respondJson(res, 200, {
+              ...payload,
+              sharedBoardOwnerId: requestedSharedBoardOwnerId
+            });
             return;
           } else if (authContext.sessionToken) {
             appendSetCookieHeader(res, createClearSessionCookie(req));
@@ -7133,7 +7796,10 @@ export function createServer({ databasePath = dbPath } = {}) {
           const payload = requestedSharedBoard
             ? normalizeAppDataSnapshot({ boards: [requestedSharedBoard] })
             : anonymousSnapshot;
-          respondJson(res, 200, payload);
+          respondJson(res, 200, {
+            ...payload,
+            sharedBoardOwnerId: requestedSharedBoardOwnerId
+          });
           return;
         }
         if (method === 'PUT') {

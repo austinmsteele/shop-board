@@ -1,3 +1,5 @@
+import { createApiRequestError, isAuthRequiredApiError } from './app-api-errors.js';
+
 const DATA_KEY = 'shopping-organizer-data-v1';
 const LEGACY_ITEMS_KEY = 'shopping-organizer-items';
 const VIEW_STORAGE_KEY = 'shopping-organizer-view';
@@ -152,6 +154,8 @@ const errorDialogTitle = document.querySelector('#error-dialog-title');
 const errorDialogMessage = document.querySelector('#error-dialog-message');
 const errorDialogCloseBtn = document.querySelector('#error-dialog-close-btn');
 const errorDialogOkBtn = document.querySelector('#error-dialog-ok-btn');
+const firstLinkNoticeDialog = document.querySelector('#first-link-notice-dialog');
+const firstLinkNoticeOkBtn = document.querySelector('#first-link-notice-ok-btn');
 const newBoardDialog = document.querySelector('#new-board-dialog');
 const newBoardForm = document.querySelector('#new-board-form');
 const newBoardTitle = document.querySelector('#new-board-title');
@@ -206,6 +210,8 @@ const DEFAULT_DATA_CATEGORIES = [
 const CATEGORY_TYPE_OPTIONS = new Set(['text', 'number', 'boolean', 'select']);
 const UNDO_HISTORY_LIMIT = 120;
 const REMOTE_BOARD_SYNC_INTERVAL_MS = 4000;
+const HOVER_PREVIEW_TRANSIT_HIDE_DELAY_MS = 650;
+const HOVER_PREVIEW_EXIT_HIDE_DELAY_MS = 180;
 let data = loadData();
 let activeBoardId = null;
 let activeView = loadView();
@@ -240,6 +246,7 @@ let boardEditTargetId = null;
 let boardEditPreviewDraft = ['', '', ''];
 let boardEditActiveSlot = 0;
 let boardEditCustomCandidates = [];
+let firstLinkNoticeAcknowledgeInFlight = false;
 const expandedCategoryIds = new Set();
 let draggingBoardId = null;
 let addCategoryTargetValue = '';
@@ -697,6 +704,81 @@ async function processExtractionQueue() {
   }
 }
 
+async function maybeTriggerFirstLinkNotice() {
+  if (!activeSessionUser || !activeSessionUser.firstLinkNoticeEligible || activeSessionUser.hasSeenFirstLinkNotice) {
+    return false;
+  }
+  if (activeSessionUser.firstLinkNoticeTriggeredAt) {
+    syncFirstLinkNoticeDialog();
+    return hasPendingFirstLinkNotice();
+  }
+  try {
+    const response = await fetch('/api/first-link-notice/trigger', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}'
+    });
+    let payload = {};
+    try {
+      payload = await response.json();
+    } catch {
+      payload = {};
+    }
+    if (!response.ok) {
+      throw new Error(String(payload?.error || 'Could not update first-link notice state.'));
+    }
+    const nextUser = normalizeSessionUser(payload?.user);
+    if (nextUser) {
+      activeSessionUser = nextUser;
+      applySessionIdentity(activeSessionUser);
+    }
+    if (payload?.shouldShowNotice) {
+      syncFirstLinkNoticeDialog();
+      return true;
+    }
+  } catch (error) {
+    console.warn('Could not trigger first-link notice state on account.', error);
+  }
+  return false;
+}
+
+async function acknowledgeFirstLinkNotice() {
+  if (!activeSessionUser || firstLinkNoticeAcknowledgeInFlight) return;
+  firstLinkNoticeAcknowledgeInFlight = true;
+  if (firstLinkNoticeOkBtn) firstLinkNoticeOkBtn.setAttribute('disabled', 'disabled');
+  try {
+    const response = await fetch('/api/first-link-notice/acknowledge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}'
+    });
+    let payload = {};
+    try {
+      payload = await response.json();
+    } catch {
+      payload = {};
+    }
+    if (!response.ok) {
+      throw new Error(String(payload?.error || 'Could not save first-link notice state.'));
+    }
+    const nextUser = normalizeSessionUser(payload?.user);
+    if (nextUser) {
+      activeSessionUser = nextUser;
+      applySessionIdentity(activeSessionUser);
+    } else if (activeSessionUser) {
+      activeSessionUser.hasSeenFirstLinkNotice = true;
+      applySessionIdentity(activeSessionUser);
+    }
+    if (firstLinkNoticeDialog?.open) firstLinkNoticeDialog.close();
+  } catch (error) {
+    console.warn('Could not acknowledge first-link notice on account.', error);
+    showErrorDialog('Could not save that notice right now. Please try again.', { title: 'Error' });
+  } finally {
+    firstLinkNoticeAcknowledgeInFlight = false;
+    if (firstLinkNoticeOkBtn) firstLinkNoticeOkBtn.removeAttribute('disabled');
+  }
+}
+
 async function runExtractionJob(job, signal) {
   const board = data.boards.find((entry) => entry.id === job.boardId);
   if (!board) {
@@ -723,6 +805,7 @@ async function runExtractionJob(job, signal) {
       target.collection.unshift(fallbackItem);
       saveData();
       if (activeBoardId === board.id) renderBoardDetail();
+      await maybeTriggerFirstLinkNotice();
       setStatus(
         target.pathLabel
           ? `Retailer blocked auto-fetch. Added basic item to ${target.pathLabel}.`
@@ -734,7 +817,9 @@ async function runExtractionJob(job, signal) {
     throw new Error(payload.error || 'Could not extract this URL.');
   }
 
-  const normalizedImages = normalizeImages(payload.images || payload.image || '');
+  const normalizedImages = isIkeaItemUrl(payload.url || job.url)
+    ? sanitizeIkeaItemImages(payload.url || job.url, payload.images || payload.image || '')
+    : normalizeImages(payload.images || payload.image || '');
   const preferredImage = String(payload.image || normalizedImages[0] || '').trim();
   const pinnedImages = pinPrimaryImage([preferredImage, ...normalizedImages], preferredImage || normalizedImages[0] || '');
   const overview = buildOverviewModel(payload, 500);
@@ -777,6 +862,7 @@ async function runExtractionJob(job, signal) {
   saveData();
   queueSyncAllCustomValues(board.id, item.id, item.customFieldValues || {});
   if (activeBoardId === board.id) renderBoardDetail();
+  await maybeTriggerFirstLinkNotice();
 
   if (target.auto && target.pathLabel) {
     setStatus(`Item added to ${target.pathLabel} (auto-selected).`, false);
@@ -1361,6 +1447,12 @@ if (errorDialogOkBtn) {
   });
 }
 
+if (firstLinkNoticeOkBtn) {
+  firstLinkNoticeOkBtn.addEventListener('click', () => {
+    void acknowledgeFirstLinkNotice();
+  });
+}
+
 if (newBoardCancelBtn) {
   newBoardCancelBtn.addEventListener('click', () => {
     if (newBoardDialog?.open) newBoardDialog.close();
@@ -1428,7 +1520,7 @@ if (hoverPreview) {
     cancelHoverPreviewHide();
   });
   hoverPreview.addEventListener('mouseleave', () => {
-    scheduleHoverPreviewHide();
+    scheduleHoverPreviewHide(HOVER_PREVIEW_EXIT_HIDE_DELAY_MS);
   });
 }
 
@@ -1573,7 +1665,7 @@ document.addEventListener('mousemove', (event) => {
     cancelHoverPreviewHide();
     return;
   }
-  scheduleHoverPreviewHide();
+  scheduleHoverPreviewHide(HOVER_PREVIEW_TRANSIT_HIDE_DELAY_MS);
 });
 
 document.addEventListener('mousedown', (event) => {
@@ -1920,16 +2012,37 @@ function normalizeSessionUser(user) {
     email: String(user.email || '').trim(),
     displayName: String(user.displayName || '').trim() || 'ShopBoard User',
     hasSeenBetaWelcome: Boolean(user.hasSeenBetaWelcome),
-    betaAccessAcknowledgedAt: user.betaAccessAcknowledgedAt || null
+    betaAccessAcknowledgedAt: user.betaAccessAcknowledgedAt || null,
+    hasSeenFirstLinkNotice: Boolean(user.hasSeenFirstLinkNotice),
+    firstLinkNoticeEligible: Boolean(user.firstLinkNoticeEligible),
+    firstLinkNoticeTriggeredAt: user.firstLinkNoticeTriggeredAt || null
   };
+}
+
+function hasPendingFirstLinkNotice(user = activeSessionUser) {
+  return Boolean(
+    user
+    && user.firstLinkNoticeEligible
+    && !user.hasSeenFirstLinkNotice
+    && user.firstLinkNoticeTriggeredAt
+  );
+}
+
+function syncFirstLinkNoticeDialog() {
+  if (!firstLinkNoticeDialog) return;
+  if (hasPendingFirstLinkNotice()) {
+    if (!firstLinkNoticeDialog.open) firstLinkNoticeDialog.showModal();
+    return;
+  }
+  if (firstLinkNoticeDialog.open) firstLinkNoticeDialog.close();
 }
 
 function deriveAuthUsername(user) {
   if (!user || typeof user !== 'object') return '';
-  const emailLocal = String(user.email || '').split('@')[0]?.trim() || '';
-  if (emailLocal) return emailLocal;
   const displayName = String(user.displayName || '').trim();
-  return displayName;
+  if (displayName) return displayName;
+  const emailLocal = String(user.email || '').split('@')[0]?.trim() || '';
+  return deriveNameFromEmail(emailLocal);
 }
 
 function applySessionIdentity(user) {
@@ -1977,6 +2090,7 @@ function applySessionIdentity(user) {
   if (profileAvatar) {
     profileAvatar.textContent = getInitialsFromName(fallbackName) || 'S';
   }
+  syncFirstLinkNoticeDialog();
 }
 
 async function handleHomeAuthButtonClick(anchorBtn = null) {
@@ -2338,6 +2452,11 @@ function buildInitialDataHydrationPath() {
 async function hydrateDataFromServer() {
   try {
     const payload = await apiRequest(buildInitialDataHydrationPath());
+    const requestedSharedBoardId = String(initialShareIntent?.boardId || '').trim();
+    const requestedSharedBoardOwnerId = String(payload?.sharedBoardOwnerId || '').trim();
+    if (requestedSharedBoardId && requestedSharedBoardOwnerId) {
+      rememberSharedBoardOwner(requestedSharedBoardId, requestedSharedBoardOwnerId);
+    }
     const serverBoards = Array.isArray(payload?.boards) ? payload.boards : [];
     const normalizedServerData = { boards: serverBoards.map(normalizeBoard) };
     const hasServerData = normalizedServerData.boards.length > 0;
@@ -2575,6 +2694,117 @@ function normalizeCategoryNode(node) {
   };
 }
 
+function isIkeaItemUrl(rawUrl = '') {
+  try {
+    const host = new URL(String(rawUrl || '')).hostname.toLowerCase();
+    return /(^|\.)ikea\.com$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
+function extractIkeaItemImageTokens(itemUrl = '') {
+  if (!isIkeaItemUrl(itemUrl)) return { slug: '', identityParts: [], slugParts: [] };
+  try {
+    const pathParts = String(new URL(itemUrl).pathname || '')
+      .split('/')
+      .filter(Boolean)
+      .map((part) => decodeURIComponent(part).trim().toLowerCase());
+    const productIndex = pathParts.findIndex((part) => part === 'p');
+    const rawSlug = productIndex >= 0 ? String(pathParts[productIndex + 1] || '') : '';
+    const slug = rawSlug
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    const slugParts = slug
+      .split('-')
+      .map((part) => part.trim())
+      .filter((part) => /^[a-z]{3,}$/.test(part));
+    const genericParts = new Set([
+      'table', 'tables', 'desk', 'desks', 'chair', 'chairs', 'stool', 'stools', 'bench', 'benches',
+      'cabinet', 'cabinets', 'shelf', 'shelves', 'bookcase', 'bookcases', 'bed', 'beds', 'frame', 'frames',
+      'sofa', 'sofas', 'lamp', 'lamps', 'storage', 'unit', 'units', 'side', 'coffee', 'dining', 'console',
+      'tv', 'media', 'nightstand', 'outdoor', 'indoor', 'round', 'square', 'rectangular', 'oak', 'pine',
+      'veneer', 'white', 'black', 'brown', 'gray', 'grey', 'green', 'blue', 'red', 'yellow', 'dark', 'light'
+    ]);
+    const identityParts = [];
+    for (const part of slugParts) {
+      if (genericParts.has(part)) {
+        if (identityParts.length) break;
+        continue;
+      }
+      identityParts.push(part);
+      if (identityParts.length >= 3) break;
+    }
+    return {
+      slug,
+      identityParts: identityParts.length ? identityParts : slugParts.slice(0, Math.min(2, slugParts.length)),
+      slugParts
+    };
+  } catch {
+    return { slug: '', identityParts: [], slugParts: [] };
+  }
+}
+
+function scoreIkeaItemImageMatch(itemUrl = '', imageUrl = '') {
+  const tokens = extractIkeaItemImageTokens(itemUrl);
+  if (!tokens.slug && !tokens.slugParts.length) return 0;
+  try {
+    const parsed = new URL(String(imageUrl || ''));
+    const host = parsed.hostname.toLowerCase();
+    const path = parsed.pathname.toLowerCase();
+    if (!/(^|\.)ikea\.com$/.test(host)) return 0;
+    if (!/\/images\/products\//i.test(path)) return 0;
+    const normalizedPath = path.replace(/[^a-z0-9/._-]+/g, '-');
+    let score = 0;
+    if (
+      tokens.slug &&
+      (
+        normalizedPath.includes(`/${tokens.slug}__`) ||
+        normalizedPath.includes(`/${tokens.slug}_`) ||
+        normalizedPath.includes(`/${tokens.slug}.`) ||
+        normalizedPath.includes(`/${tokens.slug}-`)
+      )
+    ) {
+      score = Math.max(score, 90);
+    }
+    if (tokens.identityParts.length) {
+      const matchedIdentity = tokens.identityParts.filter((part) => normalizedPath.includes(part));
+      if (matchedIdentity.length >= 2) score = Math.max(score, 70);
+      if (matchedIdentity.length && matchedIdentity.includes(tokens.identityParts[0])) score = Math.max(score, 60);
+    }
+    if (tokens.slugParts.length >= 3) {
+      const matchedParts = tokens.slugParts.filter((part) => normalizedPath.includes(part));
+      if (matchedParts.length >= 3) score = Math.max(score, 60);
+      else if (matchedParts.length >= 2) score = Math.max(score, 45);
+    }
+    return score;
+  } catch {
+    return 0;
+  }
+}
+
+function sanitizeIkeaItemImages(itemUrl = '', rawImages = []) {
+  const normalized = normalizeImages(rawImages).filter((entry) => {
+    try {
+      const parsed = new URL(entry);
+      return /(^|\.)ikea\.com$/.test(parsed.hostname.toLowerCase()) && /\/images\/products\//i.test(parsed.pathname);
+    } catch {
+      return false;
+    }
+  });
+  const scored = normalized
+    .map((imageUrl) => ({
+      imageUrl,
+      score: scoreIkeaItemImageMatch(itemUrl, imageUrl)
+    }))
+    .filter((entry) => entry.score >= 60);
+  const bestScore = scored.reduce((max, entry) => Math.max(max, entry.score), 0);
+  return scored
+    .filter((entry) => entry.score === bestScore)
+    .map((entry) => entry.imageUrl);
+}
+
 function normalizeItems(items) {
   const list = Array.isArray(items) ? items : [];
   return list.map((item) => ({
@@ -2586,7 +2816,9 @@ function normalizeItems(items) {
       const rawName = String(item?.name || (isTotalCostRow ? TOTAL_COST_ROW_NAME : 'Untitled item'));
       const name = normalizeItemName(rawName, url, { brand, seller });
       const highlights = normalizeHighlights(item?.highlights || item?.notes || []);
-      const normalizedImages = normalizeImages(item?.images || item?.image || '');
+      const normalizedImages = isIkeaItemUrl(url)
+        ? sanitizeIkeaItemImages(url, item?.images || item?.image || '')
+        : normalizeImages(item?.images || item?.image || '');
       const featuredImage = String(item?.image || normalizedImages[0] || '').trim();
       const pinnedImages = pinPrimaryImage([featuredImage, ...normalizedImages], featuredImage || normalizedImages[0] || '');
       const overview = buildOverviewModel(item, 500);
@@ -3077,6 +3309,10 @@ async function fetchRemoteBoardSnapshot(boardId, ownerId = '') {
   });
   if (!response.ok) return null;
   const payload = await response.json();
+  const resolvedOwnerId = String(payload?.ownerId || '').trim();
+  if (normalizedBoardId && resolvedOwnerId) {
+    rememberSharedBoardOwner(normalizedBoardId, resolvedOwnerId);
+  }
   const board = normalizeBoard(payload?.board || {});
   if (String(board?.id || '').trim() !== normalizedBoardId) return null;
   return board;
@@ -3283,7 +3519,7 @@ async function apiRequest(path, options = {}) {
         promptAuthForAction('Sign in to use this feature.');
       }
     }
-    throw new Error(String(payload?.error || `Request failed (${response.status})`));
+    throw createApiRequestError(payload?.error, response.status);
   }
   return payload;
 }
@@ -3323,6 +3559,7 @@ async function loadBoardCategoryData(boardId, options = {}) {
       if (!Array.isArray(board.fieldCategories) || !board.fieldCategories.length) {
         board.fieldCategories = createDefaultFieldCategories(board.id);
       }
+      if (isAuthRequiredApiError(error)) return;
       setStatus(error instanceof Error ? error.message : 'Could not load categories.', true);
     } finally {
       boardCategoryLoadPromises.delete(boardId);
@@ -3364,6 +3601,7 @@ function getSyncableBoardFieldIds(boardId) {
 }
 
 function queueSyncAllCustomValues(boardId, itemId, valuesMap) {
+  if (!activeSessionUser) return;
   if (!boardId || !itemId || !valuesMap || typeof valuesMap !== 'object') return;
   const syncableIds = getSyncableBoardFieldIds(boardId);
   if (!syncableIds.size) return;
@@ -3379,11 +3617,13 @@ function queueSyncAllCustomValues(boardId, itemId, valuesMap) {
   }
   if (!Object.keys(payload).length) return;
   syncItemCustomValues(boardId, itemId, payload).catch((error) => {
+    if (isAuthRequiredApiError(error)) return;
     setStatus(error instanceof Error ? error.message : 'Could not sync custom values.', true);
   });
 }
 
 function queueSyncCustomValue(boardId, itemId, categoryId, entry) {
+  if (!activeSessionUser) return;
   if (!boardId || !itemId || !categoryId) return;
   const syncableIds = getSyncableBoardFieldIds(boardId);
   if (!syncableIds.has(String(categoryId || '').trim())) return;
@@ -3402,6 +3642,7 @@ function queueSyncCustomValue(boardId, itemId, categoryId, entry) {
     try {
       await syncItemCustomValues(boardId, itemId, current);
     } catch (error) {
+      if (isAuthRequiredApiError(error)) return;
       setStatus(error instanceof Error ? error.message : 'Could not save custom value.', true);
     }
   });
@@ -4339,6 +4580,10 @@ async function fetchSharedBoardForShareIntent(boardId, ownerId = '') {
         });
         if (!response.ok) continue;
         const payload = await response.json();
+        const resolvedOwnerId = String(payload?.ownerId || '').trim();
+        if (normalizedBoardId && resolvedOwnerId) {
+          rememberSharedBoardOwner(normalizedBoardId, resolvedOwnerId);
+        }
         const board = normalizeBoard(payload?.board || {});
         if (String(board?.id || '').trim() !== normalizedBoardId) continue;
         return board;
@@ -5920,6 +6165,7 @@ async function saveInlineCategoryHeaderEdit() {
     renderBoardDetail();
     setStatus('Fields saved.');
   } catch (error) {
+    if (isAuthRequiredApiError(error)) return;
     setStatus(error instanceof Error ? error.message : 'Could not save fields.', true);
   }
 }
@@ -6754,7 +7000,7 @@ function buildCategoryItemsReadOnlyTable(items, categoryNode = null) {
           showHoverPreview(item.id);
         });
         imagePreviewTarget.addEventListener('mouseleave', () => {
-          scheduleHoverPreviewHide();
+          scheduleHoverPreviewHide(HOVER_PREVIEW_TRANSIT_HIDE_DELAY_MS);
         });
       }
       tbody.appendChild(tr);
@@ -7087,7 +7333,7 @@ function buildItemCellForCategory(row, item, category, board, collectionItems = 
         showHoverPreview(item.id);
       });
       imageEditTarget.addEventListener('mouseleave', () => {
-        scheduleHoverPreviewHide();
+        scheduleHoverPreviewHide(HOVER_PREVIEW_TRANSIT_HIDE_DELAY_MS);
       });
     }
     return cell;
@@ -7345,20 +7591,23 @@ function showHoverPreview(itemId) {
   if (!item) return;
   const images = getItemImages(item);
   if (!images.length) return;
+  const isSameItem = hoverPreviewItemId === itemId;
   cancelHoverPreviewHide();
   hoverPreviewItemId = itemId;
   hoverPreviewImages = images;
+  if (!isSameItem) hoverPreviewIndex = 0;
   hoverPreviewIndex = Math.max(0, Math.min(hoverPreviewIndex, hoverPreviewImages.length - 1));
   renderHoverPreview();
   hoverPreview.classList.remove('hidden');
   hoverPreview.setAttribute('aria-hidden', 'false');
 }
 
-function scheduleHoverPreviewHide() {
+function scheduleHoverPreviewHide(delayMs = HOVER_PREVIEW_TRANSIT_HIDE_DELAY_MS) {
   cancelHoverPreviewHide();
+  const nextDelay = Number.isFinite(delayMs) ? Math.max(0, delayMs) : HOVER_PREVIEW_TRANSIT_HIDE_DELAY_MS;
   hoverPreviewHideTimer = setTimeout(() => {
     hideHoverPreview();
-  }, 140);
+  }, nextDelay);
 }
 
 function cancelHoverPreviewHide() {
@@ -7389,9 +7638,16 @@ function stepHoverPreview(delta) {
 function renderHoverPreview() {
   if (!hoverPreviewImage || !hoverPreviewImages.length) return;
   hoverPreviewImage.src = hoverPreviewImages[hoverPreviewIndex];
+  const hasMultipleImages = hoverPreviewImages.length > 1;
   const item = getHoverPreviewItem();
   const currentSrc = hoverPreviewImages[hoverPreviewIndex] || '';
   const canEditContent = canEditSharedBoardContent(getActiveBoard());
+  if (hoverPreviewPrev) {
+    hoverPreviewPrev.disabled = !hasMultipleImages;
+  }
+  if (hoverPreviewNext) {
+    hoverPreviewNext.disabled = !hasMultipleImages;
+  }
   if (hoverPreviewStar) {
     hoverPreviewStar.classList.toggle('hidden', !canEditContent);
     const isMain = item
@@ -8832,10 +9088,13 @@ async function enrichDetailImages(item, enrichState = null) {
   );
 
   if (!userChangedImagesDuringEnrichment) {
-    const mergedImages = pinPrimaryImage(
+    const mergedImagesRaw = pinPrimaryImage(
       [...currentImages, ...(payload.images || []), payload.image || ''],
       item.image || payload.image || currentImages[0] || ''
     );
+    const mergedImages = isIkeaItemUrl(item.url)
+      ? sanitizeIkeaItemImages(item.url, mergedImagesRaw)
+      : mergedImagesRaw;
     if (mergedImages.length) {
       item.images = mergedImages;
       const currentFeaturedStillExists = mergedImages.some(
@@ -9509,7 +9768,10 @@ function getInitialsFromName(name) {
     .split(/\s+/)
     .filter(Boolean);
   if (!parts.length) return 'U';
-  return parts.slice(0, 2).map((part) => part[0].toUpperCase()).join('');
+  if (parts.length === 1) {
+    return parts[0].slice(0, 2).toUpperCase();
+  }
+  return `${parts[0][0] || ''}${parts[parts.length - 1][0] || ''}`.toUpperCase();
 }
 
 function normalizeDetailList(value, limit = 12) {

@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import {
   __testOnlyParseJsonLd,
   __testOnlyPickBestProductPrice,
+  __testOnlyCollectImageCandidatesFromHtml,
   __testOnlyPickCompactItemName,
   __testOnlyPickFinalItemName,
-  __testOnlyExtractFromHtml
+  __testOnlyExtractFromHtml,
+  __testOnlyMergeProducts
 } from '../server.js';
 
 test('json-ld parser selects product candidate that matches URL context', () => {
@@ -67,6 +69,219 @@ test('price picker prefers current product price over list/installment amounts',
   `;
   const price = __testOnlyPickBestProductPrice(sourceUrl, html);
   assert.equal(price, '$139.00');
+});
+
+test('IKEA price picker prefers the main product price over later recommendation prices', () => {
+  const sourceUrl = 'https://www.ikea.com/us/en/p/fake-table-black-s12345678/';
+  const html = `
+    <html>
+      <body>
+        <main>
+          <h1>Fake Table Black</h1>
+          <section class="hero">
+            <span>Price</span>
+            <span>$249.00</span>
+          </section>
+          <div>Article Number 123.456.78</div>
+          <section class="recommendations">
+            <span>More options</span>
+            <span>$39.99</span>
+            <span>$59.99</span>
+          </section>
+        </main>
+      </body>
+    </html>
+  `;
+
+  const price = __testOnlyPickBestProductPrice(sourceUrl, html);
+  assert.equal(price, '$249.00');
+});
+
+test('IKEA price picker prefers Product JSON-LD offer price over mixed page prices', () => {
+  const sourceUrl = 'https://www.ikea.com/us/en/p/fake-table-black-s12345678/';
+  const html = `
+    <html>
+      <head>
+        <script type="application/ld+json">
+          {"@context":"https://schema.org","@type":"Product","name":"Fake Table Black","offers":{"@type":"Offer","price":"249.00","priceCurrency":"USD","url":"${sourceUrl}"}}
+        </script>
+      </head>
+      <body>
+        <span>$39.99</span>
+        <span>$59.99</span>
+      </body>
+    </html>
+  `;
+
+  const price = __testOnlyPickBestProductPrice(sourceUrl, html);
+  assert.equal(price, '$249.00');
+});
+
+test('IKEA price picker maps utag arrays to the matching URL article number', () => {
+  const sourceUrl = 'https://www.ikea.com/us/en/p/lack-coffee-table-black-brown-40104294/';
+  const html = `
+    <html>
+      <body>
+        <script type="text/javascript" data-type="utag-data">
+          var utag_data = {
+            "product_ids": ["11111111", "40104294"],
+            "product_prices": ["10.00", "29.99"]
+          };
+        </script>
+      </body>
+    </html>
+  `;
+
+  const price = __testOnlyPickBestProductPrice(sourceUrl, html);
+  assert.equal(price, '$29.99');
+});
+
+test('IKEA price picker prefers data-product-price over JSON-LD when both are present', () => {
+  const sourceUrl = 'https://www.ikea.com/us/en/p/fake-table-black-12345678/';
+  const html = `
+    <html>
+      <head>
+        <script type="application/ld+json">
+          {"@context":"https://schema.org","@type":"Product","name":"Fake Table Black","offers":{"@type":"Offer","price":"249.00","priceCurrency":"USD","url":"${sourceUrl}"}}
+        </script>
+      </head>
+      <body>
+        <div class="pipf-page js-product-pip" data-product-no="12345678" data-product-price="59.99"></div>
+      </body>
+    </html>
+  `;
+
+  const price = __testOnlyPickBestProductPrice(sourceUrl, html);
+  assert.equal(price, '$59.99');
+});
+
+test('IKEA price picker reads data-product-price when attribute order is price then product-no', () => {
+  const sourceUrl = 'https://www.ikea.com/us/en/p/fake-table-black-12345678/';
+  const html = `
+    <html>
+      <body>
+        <div class="pipf-page js-product-pip" data-product-price="59.99" data-product-no="12345678"></div>
+      </body>
+    </html>
+  `;
+
+  const price = __testOnlyPickBestProductPrice(sourceUrl, html);
+  assert.equal(price, '$59.99');
+});
+
+test('IKEA price picker chooses matching data-product-price when multiple product blocks exist', () => {
+  const sourceUrl = 'https://www.ikea.com/us/en/p/fake-table-black-12345678/';
+  const html = `
+    <html>
+      <body>
+        <div class="pipf-page js-product-pip" data-product-no="99999999" data-product-price="249.00"></div>
+        <div class="pipf-page js-product-pip" data-product-no="12345678" data-product-price="59.99"></div>
+      </body>
+    </html>
+  `;
+
+  const price = __testOnlyPickBestProductPrice(sourceUrl, html);
+  assert.equal(price, '$59.99');
+});
+
+test('IKEA price picker ignores non-product category pages with generic teaser prices', () => {
+  const sourceUrl = 'https://www.ikea.com/us/en/cat/products-products/';
+  const html = `
+    <html>
+      <head><title>Products - IKEA</title></head>
+      <body>
+        <script type="text/javascript" data-type="utag-data">
+          var utag_data = {
+            "product_ids": ["99999999"],
+            "product_prices": ["10.00"]
+          };
+        </script>
+        <span>$10.00</span>
+        <span>$29.99</span>
+      </body>
+    </html>
+  `;
+
+  const price = __testOnlyPickBestProductPrice(sourceUrl, html);
+  assert.equal(price, '');
+});
+
+test('IKEA image collector ignores non-product category pages', () => {
+  const sourceUrl = 'https://www.ikea.com/us/en/cat/products-products/';
+  const html = `
+    <html>
+      <body>
+        <img src="https://www.ikea.com/ext/ingkadam/m/4ab955a85bb2bde6/original/PH209119.jpg?imwidth=400" />
+        <img src="https://www.ikea.com/us/en/images/products/other-table-oak__999999_pe111111_s5.jpg?f=xl" />
+      </body>
+    </html>
+  `;
+
+  const images = __testOnlyCollectImageCandidatesFromHtml(sourceUrl, html, {}, {});
+  assert.deepEqual(images, []);
+});
+
+test('IKEA product-path URL does not emit teaser price when page content is non-product', () => {
+  const sourceUrl = 'https://www.ikea.com/us/en/p/fake-table-black-s12345678/';
+  const html = `
+    <html>
+      <head>
+        <title>Products - IKEA</title>
+      </head>
+      <body>
+        <span>$10.00</span>
+        <script type="text/javascript" data-type="utag-data">
+          var utag_data = {"product_ids":["99999999"],"product_prices":["10.00"]};
+        </script>
+      </body>
+    </html>
+  `;
+
+  const price = __testOnlyPickBestProductPrice(sourceUrl, html);
+  assert.equal(price, '');
+});
+
+test('IKEA product-path URL does not emit non-product gallery images when content is category-like', () => {
+  const sourceUrl = 'https://www.ikea.com/us/en/p/fake-table-black-s12345678/';
+  const html = `
+    <html>
+      <head>
+        <title>Products - IKEA</title>
+      </head>
+      <body>
+        <img src="https://www.ikea.com/ext/ingkadam/m/4ab955a85bb2bde6/original/PH209119.jpg?imwidth=400" />
+        <img src="https://www.ikea.com/us/en/images/products/other-table-oak__999999_pe111111_s5.jpg?f=xl" />
+      </body>
+    </html>
+  `;
+
+  const images = __testOnlyCollectImageCandidatesFromHtml(sourceUrl, html, {}, {});
+  assert.deepEqual(images, []);
+});
+
+test('IKEA merge ignores fallback candidates whose product name does not match the URL identity', () => {
+  const sourceUrl = 'https://www.ikea.com/us/en/p/fake-table-black-s12345678/';
+  const merged = __testOnlyMergeProducts(
+    {
+      name: 'Fake Table Black',
+      productTitleRaw: 'Fake Table Black',
+      image: 'https://www.ikea.com/us/en/images/products/fake-table-black__1234567_pe222222_s5.jpg?f=xl',
+      images: ['https://www.ikea.com/us/en/images/products/fake-table-black__1234567_pe222222_s5.jpg?f=xl'],
+      price: '$249.00'
+    },
+    {
+      name: 'Other Table Oak',
+      productTitleRaw: 'Other Table Oak',
+      image: 'https://www.ikea.com/us/en/images/products/other-table-oak__999999_pe111111_s5.jpg?f=xl',
+      images: ['https://www.ikea.com/us/en/images/products/other-table-oak__999999_pe111111_s5.jpg?f=xl'],
+      price: '$39.99'
+    },
+    sourceUrl
+  );
+
+  assert.equal(merged.price, '$249.00');
+  assert.ok(String(merged.image || '').includes('/images/products/fake-table-black__'));
+  assert.equal(Array.isArray(merged.images) ? merged.images.length : 0, 1);
 });
 
 test('compact item name falls back to URL model token when extracted name is generic', async () => {

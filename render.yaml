@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: shop-board
+    env: node
+    plan: starter
+    autoDeploy: true
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    disk:
+      name: shopboard-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: AUTH_PROVIDER
+        value: supabase
+      - key: DATA_DIR
+        value: /var/data/shopboard
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: ZYTE_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_ITEM_NAME_MODEL
+        value: gpt-4.1-mini
+      - key: OPENAI_API_BASE
+        value: https://api.openai.com/v1
+      - key: OPENAI_ITEM_NAME_TIMEOUT_MS
+        value: 6000
+      - key: RESEND_API_KEY
+        sync: false
+      - key: FEEDBACK_EMAIL_TO
+        sync: false
+      - key: FEEDBACK_EMAIL_FROM
+        value: ShopBoard Feedback <onboarding@resend.dev>

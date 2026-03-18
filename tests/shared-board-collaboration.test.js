@@ -175,3 +175,127 @@ test('shared board edits persist to owner snapshot and remain visible to owner',
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 });
+
+test('shared board load without owner id returns resolved owner metadata for later saves', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'shopboard-shared-owner-hint-'));
+  const databasePath = path.join(tempRoot, 'shopping-tool.sqlite');
+
+  let server = null;
+  try {
+    const bootstrap = createDataService({ databasePath });
+    bootstrap.close();
+
+    const created = createServer({ databasePath });
+    server = created.server;
+    const port = await new Promise((resolve) => {
+      server.listen(0, () => {
+        const address = server.address();
+        resolve(typeof address === 'object' && address ? address.port : 0);
+      });
+    });
+    assert.ok(port > 0);
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const ownerEmail = `owner-meta-${Date.now()}-${Math.random().toString(16).slice(2, 8)}@example.com`;
+    const collaboratorEmail = `editor-meta-${Date.now()}-${Math.random().toString(16).slice(2, 8)}@example.com`;
+    const owner = await signUpUser(baseUrl, ownerEmail);
+    const collaborator = await signUpUser(baseUrl, collaboratorEmail);
+
+    const boardId = 'shared-board-without-owner-param';
+    const initialBoard = {
+      id: boardId,
+      name: 'Ownerless Shared Lookup',
+      items: [
+        {
+          id: 'item-1',
+          name: 'Desk Lamp',
+          favoriteRank: '',
+          feedbacks: [],
+          comments: []
+        }
+      ],
+      categories: [],
+      fieldCategories: []
+    };
+
+    const seedResponse = await fetch(`${baseUrl}/api/data`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: owner.sessionCookie
+      },
+      body: JSON.stringify({ boards: [initialBoard] })
+    });
+    assert.equal(seedResponse.status, 200);
+
+    const sharedLoadResponse = await fetch(
+      `${baseUrl}/api/data?board=${encodeURIComponent(boardId)}`,
+      {
+        headers: {
+          Cookie: collaborator.sessionCookie
+        }
+      }
+    );
+    assert.equal(sharedLoadResponse.status, 200);
+    const sharedLoadPayload = await sharedLoadResponse.json();
+    assert.equal(String(sharedLoadPayload?.sharedBoardOwnerId || ''), owner.user.id);
+
+    const sharedBoardResponse = await fetch(
+      `${baseUrl}/api/shared-board?board=${encodeURIComponent(boardId)}`,
+      {
+        headers: {
+          Cookie: collaborator.sessionCookie
+        }
+      }
+    );
+    assert.equal(sharedBoardResponse.status, 200);
+    const sharedBoardPayload = await sharedBoardResponse.json();
+    assert.equal(String(sharedBoardPayload?.ownerId || ''), owner.user.id);
+
+    const updatedSharedBoard = {
+      ...initialBoard,
+      items: [
+        {
+          ...initialBoard.items[0],
+          favoriteRank: 'gold',
+          feedbacks: [
+            {
+              id: 'fb-ownerless',
+              author: 'Editor',
+              text: 'This one should stick.',
+              emojis: ['👍']
+            }
+          ]
+        }
+      ]
+    };
+
+    const sharedSaveResponse = await fetch(
+      `${baseUrl}/api/data?board=${encodeURIComponent(boardId)}&owner=${encodeURIComponent(sharedLoadPayload.sharedBoardOwnerId)}`,
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: collaborator.sessionCookie
+        },
+        body: JSON.stringify({ boards: [updatedSharedBoard] })
+      }
+    );
+    assert.equal(sharedSaveResponse.status, 200);
+
+    const ownerSnapshot = __testOnlyReadUserSnapshot(databasePath, owner.user.id);
+    const ownerBoard = (Array.isArray(ownerSnapshot?.boards) ? ownerSnapshot.boards : [])
+      .find((entry) => String(entry?.id || '') === boardId);
+    assert.ok(ownerBoard);
+    const savedItem = (Array.isArray(ownerBoard.items) ? ownerBoard.items : [])
+      .find((entry) => String(entry?.id || '') === 'item-1');
+    assert.ok(savedItem);
+    assert.equal(String(savedItem?.favoriteRank || ''), 'gold');
+    assert.equal(String(savedItem?.feedbacks?.[0]?.text || ''), 'This one should stick.');
+  } finally {
+    if (server) {
+      await new Promise((resolve) => server.close(resolve));
+    }
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});

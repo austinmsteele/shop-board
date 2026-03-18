@@ -523,6 +523,19 @@
       </form>
     </dialog>
 
+    <dialog id="first-link-notice-dialog" class="error-dialog">
+      <form id="first-link-notice-form" method="dialog" class="error-dialog-form">
+        <h2>Check your product details</h2>
+        <div class="error-dialog-message">
+          <p>Shop Board will try to pull product details from the link you paste, but they aren’t always perfect.</p>
+          <p>Please review the details and edit anything that looks incorrect.</p>
+        </div>
+        <menu class="error-dialog-actions">
+          <button id="first-link-notice-ok-btn" type="button">Got it</button>
+        </menu>
+      </form>
+    </dialog>
+
     <dialog id="auth-dialog" class="auth-dialog">
       <article class="auth-dialog-shell" aria-label="Sign in or create account">
         <button id="auth-dialog-close-btn" type="button" class="auth-dialog-close-btn" aria-label="Close sign in dialog">×</button>
@@ -605,6 +618,7 @@
       </a>
     </footer>
 
+    <script type="module" src="/feedback-widget.js"></script>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

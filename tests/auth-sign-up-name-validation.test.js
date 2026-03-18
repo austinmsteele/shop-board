@@ -53,6 +53,8 @@ test('sign up requires first and last name and stores full display name', async 
     assert.equal(successResponse.status, 201);
     const successPayload = await successResponse.json();
     assert.equal(String(successPayload?.user?.displayName || ''), 'Austin Steele');
+    assert.equal(Boolean(successPayload?.user?.firstLinkNoticeEligible), true);
+    assert.equal(Boolean(successPayload?.user?.hasSeenFirstLinkNotice), false);
   } finally {
     if (server) {
       await new Promise((resolve) => server.close(resolve));
