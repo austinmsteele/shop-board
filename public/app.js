@@ -5,6 +5,7 @@ const LEGACY_ITEMS_KEY = 'shopping-organizer-items';
 const VIEW_STORAGE_KEY = 'shopping-organizer-view';
 const DATA_BACKUP_KEY = 'shopping-organizer-data-v1-backup';
 const DATA_OWNER_KEY = 'shopping-organizer-data-owner-v1';
+const SHARED_EDIT_AUTH_MESSAGE = 'You must create an account to edit a board.';
 const BETA_AUTH_MODE_SIGN_IN = 'sign-in';
 const BETA_AUTH_MODE_SIGN_UP = 'sign-up';
 const BETA_MODE_PATH_PATTERN = /^\/beta\/?$/i;
@@ -49,6 +50,9 @@ const betaTabSignIn = document.querySelector('#beta-tab-sign-in');
 const betaTabSignUp = document.querySelector('#beta-tab-sign-up');
 const betaAuthStatus = document.querySelector('#beta-auth-status');
 const betaGateStatus = document.querySelector('#beta-gate-status');
+const demoVideoDialog = document.querySelector('#demo-video-dialog');
+const demoVideoPlayer = document.querySelector('#demo-video-player');
+const demoVideoCloseBtn = document.querySelector('#demo-video-close-btn');
 
 const boardsGrid = document.querySelector('#boards-grid');
 const boardCardTemplate = document.querySelector('#board-card-template');
@@ -216,6 +220,7 @@ let data = loadData();
 let activeBoardId = null;
 let activeView = loadView();
 let initialShareIntent = readInitialShareIntent();
+let initialDemoVideoIntent = readDemoVideoIntent();
 const betaAccessIntent = readBetaAccessIntent();
 let activeSessionUser = null;
 let betaWelcomeGateEnabled = true;
@@ -247,6 +252,8 @@ let boardEditPreviewDraft = ['', '', ''];
 let boardEditActiveSlot = 0;
 let boardEditCustomCandidates = [];
 let firstLinkNoticeAcknowledgeInFlight = false;
+let demoVideoDismissed = false;
+let demoVideoAutoplayAttempted = false;
 const expandedCategoryIds = new Set();
 let draggingBoardId = null;
 let addCategoryTargetValue = '';
@@ -1453,6 +1460,24 @@ if (firstLinkNoticeOkBtn) {
   });
 }
 
+if (demoVideoCloseBtn) {
+  demoVideoCloseBtn.addEventListener('click', () => {
+    closeDemoVideoDialog();
+  });
+}
+
+if (demoVideoDialog) {
+  demoVideoDialog.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    closeDemoVideoDialog();
+  });
+  demoVideoDialog.addEventListener('close', () => {
+    if (demoVideoPlayer && !demoVideoPlayer.paused) {
+      demoVideoPlayer.pause();
+    }
+  });
+}
+
 if (newBoardCancelBtn) {
   newBoardCancelBtn.addEventListener('click', () => {
     if (newBoardDialog?.open) newBoardDialog.close();
@@ -2037,6 +2062,45 @@ function syncFirstLinkNoticeDialog() {
   if (firstLinkNoticeDialog.open) firstLinkNoticeDialog.close();
 }
 
+function closeDemoVideoDialog() {
+  demoVideoDismissed = true;
+  if (demoVideoPlayer) {
+    demoVideoPlayer.pause();
+    demoVideoPlayer.currentTime = 0;
+  }
+  if (demoVideoDialog?.open) demoVideoDialog.close();
+}
+
+async function playDemoVideo() {
+  if (!demoVideoPlayer) return false;
+  try {
+    demoVideoPlayer.muted = false;
+    await demoVideoPlayer.play();
+    return true;
+  } catch {
+    try {
+      demoVideoPlayer.muted = true;
+      await demoVideoPlayer.play();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+async function maybePresentDemoVideo() {
+  if (!initialDemoVideoIntent || demoVideoDismissed || !demoVideoDialog || !appShell || appShell.classList.contains('hidden')) {
+    return false;
+  }
+  if (betaGate && !betaGate.classList.contains('hidden')) return false;
+  if (authDialog?.open || firstLinkNoticeDialog?.open) return false;
+  if (!demoVideoDialog.open) demoVideoDialog.showModal();
+  if (demoVideoAutoplayAttempted) return true;
+  demoVideoAutoplayAttempted = true;
+  await playDemoVideo();
+  return true;
+}
+
 function deriveAuthUsername(user) {
   if (!user || typeof user !== 'object') return '';
   const displayName = String(user.displayName || '').trim();
@@ -2091,6 +2155,7 @@ function applySessionIdentity(user) {
     profileAvatar.textContent = getInitialsFromName(fallbackName) || 'S';
   }
   syncFirstLinkNoticeDialog();
+  void maybePresentDemoVideo();
 }
 
 async function handleHomeAuthButtonClick(anchorBtn = null) {
@@ -2294,6 +2359,7 @@ async function enterAppShell() {
   await resolveInitialShareIntentWithRetries();
   if (initialShareIntent) applyInitialShareLinkState();
   renderApp();
+  await maybePresentDemoVideo();
 }
 
 function promptAuthForAction(message = 'Sign in to continue.', onSuccess = null, isError = false, authMode = BETA_AUTH_MODE_SIGN_IN) {
@@ -3830,7 +3896,7 @@ function isSharedLinkScopeActive(board = null) {
 function ensureAuthenticatedForSharedEdits(board = null) {
   if (activeSessionUser) return true;
   if (!isSharedLinkScopeActive(board)) return true;
-  promptAuthForAction('Create an account or sign in to edit this shared board.');
+  promptAuthForAction(SHARED_EDIT_AUTH_MESSAGE, null, false, BETA_AUTH_MODE_SIGN_UP);
   return false;
 }
 
@@ -4416,6 +4482,47 @@ function scheduleImageRepairRender() {
   });
 }
 
+function repairBrokenItemImage(item, failedSrc, replacementSrc = '') {
+  if (!item) return false;
+  const failedKey = canonicalImageKey(failedSrc);
+  if (!failedKey) return false;
+
+  const currentImages = getItemImages(item);
+  const remaining = currentImages.filter((src) => canonicalImageKey(src) !== failedKey);
+  if (remaining.length === currentImages.length) return false;
+
+  const currentFeaturedKey = canonicalImageKey(item.image || '');
+  const replacementKey = canonicalImageKey(replacementSrc);
+  const nextFeatured = currentFeaturedKey && currentFeaturedKey !== failedKey
+    ? (remaining.find((src) => canonicalImageKey(src) === currentFeaturedKey) || remaining[0] || '')
+    : (replacementKey
+      ? (remaining.find((src) => canonicalImageKey(src) === replacementKey) || remaining[0] || '')
+      : (remaining[0] || ''));
+
+  item.images = nextFeatured ? pinPrimaryImage(remaining, nextFeatured) : remaining;
+  item.image = nextFeatured;
+  saveData();
+  scheduleImageRepairRender();
+
+  if (detailDialog?.open && activeDetailItemId === item.id) {
+    const nextImages = getItemImages(item);
+    if (activeDetailImageIndex > nextImages.length - 1) {
+      activeDetailImageIndex = Math.max(nextImages.length - 1, 0);
+    }
+    renderDetailModal(item);
+  }
+
+  if (hoverPreviewItemId === item.id) {
+    hoverPreviewImages = getItemImages(item);
+    if (hoverPreviewIndex > hoverPreviewImages.length - 1) {
+      hoverPreviewIndex = Math.max(hoverPreviewImages.length - 1, 0);
+    }
+    renderHoverPreview();
+  }
+
+  return true;
+}
+
 function promoteItemPrimaryImage(item, src) {
   if (!item || !src) return false;
   const currentSrc = String(item.image || '').trim();
@@ -4465,6 +4572,7 @@ function bindImageFallbackToItem(imageEl, item, candidatesInput = null) {
 
   imageEl.onload = () => {
     if (fallbackHappened && index >= 0 && index !== initialIndex) {
+      repairBrokenItemImage(item, candidates[initialIndex], candidates[index]);
       promoteItemPrimaryImage(item, candidates[index]);
     }
     fallbackHappened = false;
@@ -4688,6 +4796,36 @@ function readInitialShareIntent() {
       accessParam: '',
       ownerId: ''
     };
+  }
+}
+
+function readDemoVideoIntent() {
+  const readHashParams = (hashValue) => {
+    const raw = String(hashValue || '').replace(/^#/, '').trim();
+    if (!raw) return new URLSearchParams();
+    return new URLSearchParams(raw.startsWith('?') ? raw.slice(1) : raw);
+  };
+
+  try {
+    const url = new URL(window.location.href);
+    const hashParams = readHashParams(url.hash);
+    const rawDemoValue = String(
+      url.searchParams.get('demo')
+      || hashParams.get('demo')
+      || ''
+    ).trim().toLowerCase();
+    if (rawDemoValue === '0' || rawDemoValue === 'false' || rawDemoValue === 'off') return false;
+    if (rawDemoValue === '1' || rawDemoValue === 'true' || rawDemoValue === 'video') return true;
+    const sharedBoardId = String(
+      url.searchParams.get('board')
+      || hashParams.get('board')
+      || hashParams.get('shareBoard')
+      || ''
+    ).trim();
+    if (sharedBoardId) return true;
+    return true;
+  } catch {
+    return true;
   }
 }
 
@@ -5286,11 +5424,13 @@ function buildShareLink(boardId, categoryPathIds = [], accessLevel = '') {
       url.searchParams.delete('owner');
     }
     url.searchParams.set('access', normalizedAccess);
+    url.searchParams.set('demo', '1');
     const hashParams = new URLSearchParams();
     hashParams.set('shareBoard', boardId);
     if (encodedPath) hashParams.set('category', encodedPath);
     if (ownerId) hashParams.set('owner', ownerId);
     hashParams.set('access', normalizedAccess);
+    hashParams.set('demo', '1');
     url.hash = hashParams.toString();
     return url.toString();
   } catch {
@@ -5301,11 +5441,13 @@ function buildShareLink(boardId, categoryPathIds = [], accessLevel = '') {
     if (encodedPath) params.set('category', encodedPath);
     if (ownerId) params.set('owner', ownerId);
     params.set('access', normalizedAccess);
+    params.set('demo', '1');
     const hashParams = new URLSearchParams();
     hashParams.set('shareBoard', boardId);
     if (encodedPath) hashParams.set('category', encodedPath);
     if (ownerId) hashParams.set('owner', ownerId);
     hashParams.set('access', normalizedAccess);
+    hashParams.set('demo', '1');
     return `${window.location.origin}/?${params.toString()}#${hashParams.toString()}`;
   }
 }
@@ -7638,8 +7780,10 @@ function stepHoverPreview(delta) {
 function renderHoverPreview() {
   if (!hoverPreviewImage || !hoverPreviewImages.length) return;
   hoverPreviewImage.src = hoverPreviewImages[hoverPreviewIndex];
+  const hoverItem = getHoverPreviewItem();
+  if (hoverItem) bindImageFallbackToItem(hoverPreviewImage, hoverItem, hoverPreviewImages);
   const hasMultipleImages = hoverPreviewImages.length > 1;
-  const item = getHoverPreviewItem();
+  const item = hoverItem;
   const currentSrc = hoverPreviewImages[hoverPreviewIndex] || '';
   const canEditContent = canEditSharedBoardContent(getActiveBoard());
   if (hoverPreviewPrev) {
@@ -7671,7 +7815,16 @@ function renderHoverPreview() {
     btn.type = 'button';
     btn.className = `hover-preview-thumb${index === hoverPreviewIndex ? ' active' : ''}`;
     btn.dataset.index = String(index);
-    btn.innerHTML = `<img src="${escapeHtml(src)}" alt="Preview ${index + 1}" loading="lazy" />`;
+    const thumb = document.createElement('img');
+    thumb.src = src;
+    thumb.alt = `Preview ${index + 1}`;
+    thumb.loading = 'lazy';
+    thumb.addEventListener('error', () => {
+      const currentItem = getHoverPreviewItem();
+      if (!currentItem) return;
+      repairBrokenItemImage(currentItem, src);
+    }, { once: true });
+    btn.appendChild(thumb);
     btn.addEventListener('click', (event) => {
       event.stopPropagation();
       hoverPreviewIndex = index;
@@ -8754,6 +8907,12 @@ function renderDetailThumbs(images) {
     thumb.src = src;
     thumb.alt = `Image ${index + 1}`;
     thumb.loading = 'lazy';
+    thumb.addEventListener('error', () => {
+      const board = getActiveBoard();
+      const item = board && activeDetailItemId != null ? findItemInBoard(board, activeDetailItemId) : null;
+      if (!item) return;
+      repairBrokenItemImage(item, src);
+    }, { once: true });
     thumb.addEventListener('click', () => {
       setDetailImageIndex(index);
     });

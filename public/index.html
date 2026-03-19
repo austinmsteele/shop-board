@@ -537,9 +537,9 @@
     </dialog>
 
     <dialog id="auth-dialog" class="auth-dialog">
-      <article class="auth-dialog-shell" aria-label="Sign in or create account">
-        <button id="auth-dialog-close-btn" type="button" class="auth-dialog-close-btn" aria-label="Close sign in dialog">×</button>
-        <h2 class="auth-dialog-title">Sign In or Create Account</h2>
+      <article class="auth-dialog-shell" aria-label="Create account or sign in">
+        <button id="auth-dialog-close-btn" type="button" class="auth-dialog-close-btn" aria-label="Close account dialog">×</button>
+        <h2 class="auth-dialog-title">Create Account or Sign In</h2>
         <p id="auth-dialog-message" class="auth-dialog-message hidden" aria-live="polite"></p>
 
         <section id="beta-auth-panel" class="beta-auth-panel" aria-label="Sign in or create account">
@@ -571,6 +571,22 @@
         </section>
 
         <p id="beta-auth-status" class="beta-gate-status auth-dialog-status hidden" aria-live="polite"></p>
+      </article>
+    </dialog>
+
+    <dialog id="demo-video-dialog" class="demo-video-dialog">
+      <article class="demo-video-shell" aria-label="ShopBoard demo video">
+        <div class="demo-video-frame">
+          <button id="demo-video-close-btn" type="button" class="demo-video-close-btn" aria-label="Close demo video">×</button>
+          <video
+            id="demo-video-player"
+            class="demo-video-player"
+            src="/media/sequence-01.mp4"
+            controls
+            playsinline
+            preload="metadata"
+          ></video>
+        </div>
       </article>
     </dialog>
 
