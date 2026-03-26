@@ -71,6 +71,44 @@ test('price picker prefers current product price over list/installment amounts',
   assert.equal(price, '$139.00');
 });
 
+test('price picker ignores savings amounts when the main product price appears first', () => {
+  const sourceUrl = 'https://www.example.com/products/fake-range';
+  const html = `
+    <html>
+      <body>
+        <div class="price-panel">
+          <span class="current-price">$1,398.97</span>
+          <span class="original-price">$2,649.97</span>
+          <span class="savings-copy">Save $1251 (47% Off)</span>
+          <span class="rebate-copy">+ 1 rebate available</span>
+        </div>
+      </body>
+    </html>
+  `;
+
+  const price = __testOnlyPickBestProductPrice(sourceUrl, html);
+  assert.equal(price, '$1,398.97');
+});
+
+test('PC Richard price picker prefers the main displayed price over savings text', () => {
+  const sourceUrl = 'https://www.pcrichard.com/fake-appliance/product123.html';
+  const html = `
+    <html>
+      <body>
+        <section class="pricing">
+          <div class="price-value">$1,398.97</div>
+          <div class="price-was">$2,649.97</div>
+          <div class="price-savings">Save $1251 (47% Off)</div>
+          <div class="price-rebate">+ 1 rebate available</div>
+        </section>
+      </body>
+    </html>
+  `;
+
+  const price = __testOnlyPickBestProductPrice(sourceUrl, html);
+  assert.equal(price, '$1,398.97');
+});
+
 test('IKEA price picker prefers the main product price over later recommendation prices', () => {
   const sourceUrl = 'https://www.ikea.com/us/en/p/fake-table-black-s12345678/';
   const html = `

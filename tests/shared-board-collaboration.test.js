@@ -49,7 +49,10 @@ test('shared board edits persist to owner snapshot and remain visible to owner',
     const bootstrap = createDataService({ databasePath });
     bootstrap.close();
 
-    const created = createServer({ databasePath });
+    const created = createServer({
+      databasePath,
+      boardNotificationSender: async () => {}
+    });
     server = created.server;
     const port = await new Promise((resolve) => {
       server.listen(0, () => {
@@ -185,7 +188,10 @@ test('shared board load without owner id returns resolved owner metadata for lat
     const bootstrap = createDataService({ databasePath });
     bootstrap.close();
 
-    const created = createServer({ databasePath });
+    const created = createServer({
+      databasePath,
+      boardNotificationSender: async () => {}
+    });
     server = created.server;
     const port = await new Promise((resolve) => {
       server.listen(0, () => {
@@ -292,6 +298,234 @@ test('shared board load without owner id returns resolved owner metadata for lat
     assert.ok(savedItem);
     assert.equal(String(savedItem?.favoriteRank || ''), 'gold');
     assert.equal(String(savedItem?.feedbacks?.[0]?.text || ''), 'This one should stick.');
+  } finally {
+    if (server) {
+      await new Promise((resolve) => server.close(resolve));
+    }
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('collaborator edits send a board activity notification to the owner', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'shopboard-shared-notify-owner-'));
+  const databasePath = path.join(tempRoot, 'shopping-tool.sqlite');
+  const notifications = [];
+
+  let server = null;
+  try {
+    const bootstrap = createDataService({ databasePath });
+    bootstrap.close();
+
+    const created = createServer({
+      databasePath,
+      boardNotificationSender: async (payload) => {
+        notifications.push(payload);
+      }
+    });
+    server = created.server;
+    const port = await new Promise((resolve) => {
+      server.listen(0, () => {
+        const address = server.address();
+        resolve(typeof address === 'object' && address ? address.port : 0);
+      });
+    });
+    assert.ok(port > 0);
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const owner = await signUpUser(baseUrl, `notify-owner-${Date.now()}@example.com`);
+    const collaborator = await signUpUser(baseUrl, `notify-editor-${Date.now()}@example.com`);
+
+    const boardId = 'board-notify-owner';
+    const initialBoard = {
+      id: boardId,
+      name: 'Primary Renovation Board',
+      items: [
+        {
+          id: 'item-1',
+          name: 'Walnut Vanity',
+          feedbacks: [],
+          comments: []
+        }
+      ],
+      categories: [],
+      fieldCategories: []
+    };
+
+    const seedResponse = await fetch(`${baseUrl}/api/data`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: owner.sessionCookie
+      },
+      body: JSON.stringify({ boards: [initialBoard] })
+    });
+    assert.equal(seedResponse.status, 200);
+
+    const sharedLoadResponse = await fetch(
+      `${baseUrl}/api/data?board=${encodeURIComponent(boardId)}&owner=${encodeURIComponent(owner.user.id)}`,
+      {
+        headers: {
+          Cookie: collaborator.sessionCookie
+        }
+      }
+    );
+    assert.equal(sharedLoadResponse.status, 200);
+
+    const updatedSharedBoard = {
+      ...initialBoard,
+      items: [
+        ...initialBoard.items,
+        {
+          id: 'item-2',
+          name: 'Brass Mirror',
+          comments: [],
+          feedbacks: [
+            {
+              id: 'feedback-2',
+              author: collaborator.user.displayName,
+              text: 'This mirror feels like the best fit.'
+            }
+          ]
+        }
+      ]
+    };
+
+    const sharedSaveResponse = await fetch(
+      `${baseUrl}/api/data?board=${encodeURIComponent(boardId)}&owner=${encodeURIComponent(owner.user.id)}`,
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: collaborator.sessionCookie
+        },
+        body: JSON.stringify({ boards: [updatedSharedBoard] })
+      }
+    );
+    assert.equal(sharedSaveResponse.status, 200);
+    assert.equal(notifications.length, 1);
+
+    const [notification] = notifications;
+    assert.equal(String(notification?.recipient?.id || ''), owner.user.id);
+    assert.equal(String(notification?.actor?.id || ''), collaborator.user.id);
+    assert.equal(String(notification?.board?.id || ''), boardId);
+    assert.equal(notification?.changes?.addedItems?.length, 1);
+    assert.equal(String(notification?.changes?.addedItems?.[0]?.itemName || ''), 'Brass Mirror');
+    assert.equal(notification?.changes?.addedFeedbacks?.length, 1);
+    assert.equal(String(notification?.changes?.addedFeedbacks?.[0]?.text || ''), 'This mirror feels like the best fit.');
+    assert.match(String(notification?.boardUrl || ''), new RegExp(`board=${boardId}`));
+    assert.match(String(notification?.boardUrl || ''), new RegExp(`owner=${owner.user.id}`));
+  } finally {
+    if (server) {
+      await new Promise((resolve) => server.close(resolve));
+    }
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('owner edits send a board activity notification to shared collaborators', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'shopboard-shared-notify-collab-'));
+  const databasePath = path.join(tempRoot, 'shopping-tool.sqlite');
+  const notifications = [];
+
+  let server = null;
+  try {
+    const bootstrap = createDataService({ databasePath });
+    bootstrap.close();
+
+    const created = createServer({
+      databasePath,
+      boardNotificationSender: async (payload) => {
+        notifications.push(payload);
+      }
+    });
+    server = created.server;
+    const port = await new Promise((resolve) => {
+      server.listen(0, () => {
+        const address = server.address();
+        resolve(typeof address === 'object' && address ? address.port : 0);
+      });
+    });
+    assert.ok(port > 0);
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const owner = await signUpUser(baseUrl, `notify-owner-edit-${Date.now()}@example.com`);
+    const collaborator = await signUpUser(baseUrl, `notify-collab-edit-${Date.now()}@example.com`);
+
+    const boardId = 'board-notify-collaborator';
+    const initialBoard = {
+      id: boardId,
+      name: 'Kitchen Fixtures',
+      items: [
+        {
+          id: 'item-1',
+          name: 'Bridge Faucet',
+          feedbacks: [],
+          comments: []
+        }
+      ],
+      categories: [],
+      fieldCategories: []
+    };
+
+    const seedResponse = await fetch(`${baseUrl}/api/data`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: owner.sessionCookie
+      },
+      body: JSON.stringify({ boards: [initialBoard] })
+    });
+    assert.equal(seedResponse.status, 200);
+
+    const sharedLoadResponse = await fetch(
+      `${baseUrl}/api/data?board=${encodeURIComponent(boardId)}&owner=${encodeURIComponent(owner.user.id)}`,
+      {
+        headers: {
+          Cookie: collaborator.sessionCookie
+        }
+      }
+    );
+    assert.equal(sharedLoadResponse.status, 200);
+    notifications.length = 0;
+
+    const ownerUpdatedBoard = {
+      ...initialBoard,
+      items: [
+        {
+          ...initialBoard.items[0],
+          comments: [
+            {
+              id: 'comment-owner-1',
+              author: owner.user.displayName,
+              text: "Let's compare this against one more option."
+            }
+          ],
+          feedbacks: []
+        }
+      ]
+    };
+
+    const ownerSaveResponse = await fetch(`${baseUrl}/api/data`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: owner.sessionCookie
+      },
+      body: JSON.stringify({ boards: [ownerUpdatedBoard] })
+    });
+    assert.equal(ownerSaveResponse.status, 200);
+    assert.equal(notifications.length, 1);
+
+    const [notification] = notifications;
+    assert.equal(String(notification?.recipient?.id || ''), collaborator.user.id);
+    assert.equal(String(notification?.actor?.id || ''), owner.user.id);
+    assert.equal(notification?.changes?.addedItems?.length, 0);
+    assert.equal(notification?.changes?.addedComments?.length, 1);
+    assert.equal(String(notification?.changes?.addedComments?.[0]?.itemName || ''), 'Bridge Faucet');
+    assert.equal(
+      String(notification?.changes?.addedComments?.[0]?.text || ''),
+      "Let's compare this against one more option."
+    );
   } finally {
     if (server) {
       await new Promise((resolve) => server.close(resolve));

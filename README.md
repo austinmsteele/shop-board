@@ -41,6 +41,7 @@ Optional but recommended for full feature parity:
 - `OPENAI_API_KEY`
 - `RESEND_API_KEY`
 - `FEEDBACK_EMAIL_TO`
+- `BOARD_ACTIVITY_EMAIL_FROM`
 
 Defaults already configured in `render.yaml`:
 
@@ -50,6 +51,7 @@ Defaults already configured in `render.yaml`:
 - `OPENAI_API_BASE=https://api.openai.com/v1`
 - `OPENAI_ITEM_NAME_TIMEOUT_MS=6000`
 - `FEEDBACK_EMAIL_FROM=ShopBoard Feedback <onboarding@resend.dev>`
+- `BOARD_ACTIVITY_EMAIL_FROM=ShopBoard Updates <onboarding@resend.dev>`
 
 ### 4) Persistent disk
 

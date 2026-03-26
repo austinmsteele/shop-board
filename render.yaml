@@ -38,3 +38,5 @@ services:
         sync: false
       - key: FEEDBACK_EMAIL_FROM
         value: ShopBoard Feedback <onboarding@resend.dev>
+      - key: BOARD_ACTIVITY_EMAIL_FROM
+        value: ShopBoard Updates <onboarding@resend.dev>

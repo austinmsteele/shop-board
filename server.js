@@ -82,6 +82,8 @@ const ITEM_NAME_WORD_LIMIT = 10;
 const RESEND_API_KEY = String(process.env.RESEND_API_KEY || '').trim();
 const FEEDBACK_EMAIL_TO = String(process.env.FEEDBACK_EMAIL_TO || 'austinmsteel@gmail.com').trim() || 'austinmsteel@gmail.com';
 const FEEDBACK_EMAIL_FROM = String(process.env.FEEDBACK_EMAIL_FROM || 'ShopBoard Feedback <onboarding@resend.dev>').trim() || 'ShopBoard Feedback <onboarding@resend.dev>';
+const BOARD_ACTIVITY_EMAIL_FROM = String(process.env.BOARD_ACTIVITY_EMAIL_FROM || FEEDBACK_EMAIL_FROM).trim() || FEEDBACK_EMAIL_FROM;
+const APP_ORIGIN = String(process.env.APP_ORIGIN || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '');
 const SITE_FEEDBACK_CATEGORY_OPTIONS = new Map([
   ['site bug', 'Site bug'],
   ['new feature', 'New feature'],
@@ -152,6 +154,7 @@ const MIME_TYPES = {
   '.css': 'text/css; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.mp4': 'video/mp4',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
@@ -192,6 +195,162 @@ function writeAppDataSnapshot(snapshot, filePath = appDataPath) {
     await fs.rename(tempPath, filePath);
   });
   return appDataWriteChain;
+}
+
+function normalizeInterviewProjectPayload(value) {
+  const parsed = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  return {
+    projectName: String(parsed.projectName || '').trim().slice(0, 200),
+    transcriptFileName: String(parsed.transcriptFileName || '').trim().slice(0, 240),
+    transcriptWarning: String(parsed.transcriptWarning || '').trim().slice(0, 1_000),
+    speakerEditorOpen: parsed.speakerEditorOpen !== false,
+    speakerAssignments: normalizeInterviewSpeakerAssignments(parsed.speakerAssignments),
+    bites: normalizeInterviewProjectBites(parsed.bites)
+  };
+}
+
+function normalizeInterviewSpeakerAssignments(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .slice(0, 10)
+    .map((entry) => {
+      const parsed = entry && typeof entry === 'object' ? entry : {};
+      return {
+        key: String(parsed.key || '').trim().slice(0, 120),
+        label: String(parsed.label || '').trim().slice(0, 120),
+        name: String(parsed.name || '').trim().slice(0, 120),
+        draft: String(parsed.draft || '').trim().slice(0, 120)
+      };
+    })
+    .filter((entry) => entry.key || entry.label || entry.name || entry.draft);
+}
+
+function normalizeInterviewProjectBites(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .slice(0, 2_500)
+    .map((entry) => normalizeInterviewProjectBite(entry))
+    .filter(Boolean);
+}
+
+function normalizeInterviewProjectBite(value) {
+  const parsed = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const tone = String(parsed.tone || 'none').trim().toLowerCase();
+  const normalizedTone = tone === 'red' || tone === 'yellow' || tone === 'green' ? tone : 'none';
+  const comments = Array.isArray(parsed.comments)
+    ? parsed.comments
+        .map((comment) => String(comment || '').trim().slice(0, 1_000))
+        .filter(Boolean)
+        .slice(0, 100)
+    : [];
+  return {
+    id: String(parsed.id || crypto.randomUUID()).trim().slice(0, 120) || crypto.randomUUID(),
+    startSeconds: normalizeInterviewProjectTimeValue(parsed.startSeconds),
+    endSeconds: normalizeInterviewProjectTimeValue(parsed.endSeconds),
+    text: String(parsed.text || '').replace(/\r\n/g, '\n').trim().slice(0, 20_000),
+    tone: normalizedTone,
+    speakerKey: String(parsed.speakerKey || '').trim().slice(0, 120),
+    speakerLabel: String(parsed.speakerLabel || '').trim().slice(0, 120),
+    comments
+  };
+}
+
+function normalizeInterviewProjectTimeValue(value) {
+  if (value == null || value === '') return null;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0) return null;
+  return numeric;
+}
+
+function serializeInterviewProjectRow(row) {
+  if (!row) return null;
+  const payload = normalizeInterviewProjectPayload(safeJsonParse(row.payload_json || '{}', {}));
+  const id = String(row.id || '').trim();
+  const version = Math.max(0, Number(row.version) || 0);
+  const audioAvailable = Math.max(0, Number(row.audio_bytes) || 0) > 0;
+  return {
+    id,
+    version,
+    createdAt: String(row.created_at || ''),
+    updatedAt: String(row.updated_at || ''),
+    audioFileName: String(row.audio_filename || '').trim(),
+    audioAvailable,
+    ...payload
+  };
+}
+
+function readInterviewProjectRow(db, projectId) {
+  return db.prepare(`
+    SELECT
+      id,
+      payload_json,
+      audio_filename,
+      version,
+      created_at,
+      updated_at,
+      CASE WHEN audio_blob IS NOT NULL THEN length(audio_blob) ELSE 0 END AS audio_bytes
+    FROM interview_projects
+    WHERE id = ?
+  `).get(projectId);
+}
+
+function createInterviewProjectRecord(db) {
+  const id = crypto.randomUUID();
+  db.prepare('INSERT INTO interview_projects (id, payload_json) VALUES (?, ?)').run(id, '{}');
+  return serializeInterviewProjectRow(readInterviewProjectRow(db, id));
+}
+
+function readInterviewProjectRecord(db, projectId) {
+  return serializeInterviewProjectRow(readInterviewProjectRow(db, projectId));
+}
+
+function writeInterviewProjectPayload(db, projectId, payload) {
+  const normalized = normalizeInterviewProjectPayload(payload);
+  const info = db.prepare(`
+    UPDATE interview_projects
+    SET
+      payload_json = ?,
+      version = version + 1,
+      updated_at = (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    WHERE id = ?
+  `).run(JSON.stringify(normalized), projectId);
+  if (!info.changes) {
+    throw createHttpError('Shared project not found.', 404);
+  }
+  return readInterviewProjectRecord(db, projectId);
+}
+
+function writeInterviewProjectAudio(db, projectId, buffer, filename, mimeType) {
+  const normalizedFilename = String(filename || 'audio').trim().slice(0, 240) || 'audio';
+  const normalizedMimeType = String(mimeType || 'application/octet-stream').trim().slice(0, 120) || 'application/octet-stream';
+  const info = db.prepare(`
+    UPDATE interview_projects
+    SET
+      audio_blob = ?,
+      audio_filename = ?,
+      audio_mime_type = ?
+    WHERE id = ?
+  `).run(buffer, normalizedFilename, normalizedMimeType, projectId);
+  if (!info.changes) {
+    throw createHttpError('Shared project not found.', 404);
+  }
+}
+
+function readInterviewProjectAudio(db, projectId) {
+  const row = db.prepare(`
+    SELECT
+      audio_blob,
+      audio_filename,
+      audio_mime_type
+    FROM interview_projects
+    WHERE id = ?
+  `).get(projectId);
+  if (!row?.audio_blob) return null;
+  return {
+    buffer: Buffer.from(row.audio_blob),
+    filename: String(row.audio_filename || '').trim(),
+    mimeType: String(row.audio_mime_type || 'application/octet-stream').trim() || 'application/octet-stream'
+  };
 }
 
 async function resolveAnonymousSnapshot(db) {
@@ -328,6 +487,103 @@ function readJsonBody(req, maxBytes = 1_000_000) {
   });
 }
 
+function readBinaryBody(req, maxBytes = 100_000_000) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let totalBytes = 0;
+    req.on('data', (chunk) => {
+      const nextChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += nextChunk.length;
+      if (totalBytes > maxBytes) {
+        reject(createHttpError('Request body too large.', 413));
+        req.destroy();
+        return;
+      }
+      chunks.push(nextChunk);
+    });
+    req.on('end', () => {
+      resolve(Buffer.concat(chunks));
+    });
+    req.on('error', reject);
+  });
+}
+
+function respondBuffer(req, res, buffer, mimeType = 'application/octet-stream') {
+  const payload = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || '');
+  const baseHeaders = {
+    'Content-Type': mimeType,
+    'Cache-Control': 'no-store',
+    'Accept-Ranges': 'bytes'
+  };
+  const totalBytes = payload.length;
+  const rangeHeader = String(req.headers.range || '').trim();
+  const rangeMatch = rangeHeader.match(/^bytes=(\d*)-(\d*)$/i);
+
+  if (rangeMatch) {
+    const startRaw = rangeMatch[1];
+    const endRaw = rangeMatch[2];
+    let start = startRaw ? Number.parseInt(startRaw, 10) : NaN;
+    let end = endRaw ? Number.parseInt(endRaw, 10) : NaN;
+
+    if (!startRaw) {
+      const suffixLength = Number.parseInt(endRaw, 10);
+      if (!Number.isInteger(suffixLength) || suffixLength <= 0) {
+        res.writeHead(416, {
+          ...baseHeaders,
+          'Content-Range': `bytes */${totalBytes}`
+        });
+        res.end();
+        return;
+      }
+      start = Math.max(totalBytes - suffixLength, 0);
+      end = Math.max(totalBytes - 1, 0);
+    } else {
+      if (!Number.isInteger(start) || start < 0 || start >= totalBytes) {
+        res.writeHead(416, {
+          ...baseHeaders,
+          'Content-Range': `bytes */${totalBytes}`
+        });
+        res.end();
+        return;
+      }
+      if (!endRaw || !Number.isInteger(end) || end >= totalBytes) {
+        end = Math.max(totalBytes - 1, 0);
+      }
+    }
+
+    if (!Number.isInteger(start) || !Number.isInteger(end) || end < start) {
+      res.writeHead(416, {
+        ...baseHeaders,
+        'Content-Range': `bytes */${totalBytes}`
+      });
+      res.end();
+      return;
+    }
+
+    res.writeHead(206, {
+      ...baseHeaders,
+      'Content-Range': `bytes ${start}-${end}/${totalBytes}`,
+      'Content-Length': String(end - start + 1)
+    });
+    if ((req.method || 'GET').toUpperCase() === 'HEAD') {
+      res.end();
+      return;
+    }
+    res.end(payload.subarray(start, end + 1));
+    return;
+  }
+
+  res.writeHead(200, {
+    ...baseHeaders,
+    'Content-Length': String(totalBytes)
+  });
+  if ((req.method || 'GET').toUpperCase() === 'HEAD') {
+    res.end();
+    return;
+  }
+  res.end(payload);
+}
+
 function createHttpError(message, status = 500) {
   const error = new Error(message);
   error.status = status;
@@ -446,6 +702,242 @@ async function sendSiteFeedbackEmail(submission = {}) {
     });
     throw createHttpError('Feedback could not be sent right now. Please try again later.', 502);
   }
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function normalizeBoardActivityText(value, maxLength = 500) {
+  return String(value || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+}
+
+function deriveBoardItemName(item, fallback = 'Untitled item') {
+  const candidate = normalizeBoardActivityText(
+    item?.name || item?.title || item?.itemName || item?.label || '',
+    160
+  );
+  return candidate || fallback;
+}
+
+function buildBoardItemKey(item, index = 0) {
+  const itemId = String(item?.id || '').trim();
+  if (itemId) return `id:${itemId}`;
+  const name = deriveBoardItemName(item, '').toLowerCase();
+  return `fallback:${index}:${name}`;
+}
+
+function normalizeBoardDiscussionEntry(entry, index = 0) {
+  if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+    const id = String(entry.id || '').trim();
+    const author = normalizeBoardActivityText(entry.author || entry.user || entry.displayName || '', 120);
+    const text = normalizeBoardActivityText(entry.text || entry.comment || entry.message || entry.body || '', 800);
+    const createdAt = String(entry.createdAt || entry.created_at || '').trim().slice(0, 80);
+    const fingerprint = id || `${author}|${text}|${createdAt}|${index}`;
+    return {
+      id,
+      author,
+      text,
+      createdAt,
+      fingerprint
+    };
+  }
+
+  const text = normalizeBoardActivityText(entry, 800);
+  return {
+    id: '',
+    author: '',
+    text,
+    createdAt: '',
+    fingerprint: `text:${text}|${index}`
+  };
+}
+
+function summarizeAddedBoardEntries(previousEntries, nextEntries) {
+  const previousFingerprints = new Set(
+    (Array.isArray(previousEntries) ? previousEntries : [])
+      .map((entry, index) => normalizeBoardDiscussionEntry(entry, index).fingerprint)
+      .filter(Boolean)
+  );
+  return (Array.isArray(nextEntries) ? nextEntries : [])
+    .map((entry, index) => normalizeBoardDiscussionEntry(entry, index))
+    .filter((entry) => entry.text && !previousFingerprints.has(entry.fingerprint));
+}
+
+function summarizeBoardActivityChanges(previousBoard, nextBoard) {
+  const previousItems = listBoardItems(previousBoard);
+  const nextItems = listBoardItems(nextBoard);
+  const previousItemsByKey = new Map(previousItems.map((item, index) => [buildBoardItemKey(item, index), item]));
+  const addedItems = [];
+  const addedFeedbacks = [];
+  const addedComments = [];
+
+  for (const [index, item] of nextItems.entries()) {
+    const itemKey = buildBoardItemKey(item, index);
+    const previousItem = previousItemsByKey.get(itemKey);
+    const itemName = deriveBoardItemName(item);
+    const itemId = String(item?.id || '').trim();
+
+    if (!previousItem) {
+      addedItems.push({ itemId, itemName });
+    }
+
+    for (const feedback of summarizeAddedBoardEntries(previousItem?.feedbacks, item?.feedbacks)) {
+      addedFeedbacks.push({
+        itemId,
+        itemName,
+        author: feedback.author,
+        text: feedback.text
+      });
+    }
+
+    for (const comment of summarizeAddedBoardEntries(previousItem?.comments, item?.comments)) {
+      addedComments.push({
+        itemId,
+        itemName,
+        author: comment.author,
+        text: comment.text
+      });
+    }
+  }
+
+  return {
+    addedItems,
+    addedFeedbacks,
+    addedComments,
+    hasChanges: Boolean(addedItems.length || addedFeedbacks.length || addedComments.length)
+  };
+}
+
+function formatBoardActivityListLines(entries, formatter, maxEntries = 8) {
+  const lines = entries.slice(0, maxEntries).map((entry) => `- ${formatter(entry)}`);
+  const remaining = entries.length - Math.min(entries.length, maxEntries);
+  if (remaining > 0) {
+    lines.push(`- ${remaining} more`);
+  }
+  return lines;
+}
+
+function formatBoardActivityEmailText(notification = {}) {
+  const boardName = normalizeBoardActivityText(notification?.board?.name || 'Untitled board', 160) || 'Untitled board';
+  const actorName = normalizeBoardActivityText(notification?.actor?.displayName || notification?.actor?.email || 'Someone', 120) || 'Someone';
+  const lines = [
+    `${actorName} updated "${boardName}" on ShopBoard.`,
+    ''
+  ];
+
+  if (notification?.changes?.addedItems?.length) {
+    lines.push('Items added:');
+    lines.push(...formatBoardActivityListLines(notification.changes.addedItems, (entry) => entry.itemName));
+    lines.push('');
+  }
+
+  if (notification?.changes?.addedFeedbacks?.length) {
+    lines.push('Feedback added:');
+    lines.push(...formatBoardActivityListLines(notification.changes.addedFeedbacks, (entry) => {
+      const authorPrefix = entry.author ? `${entry.author}: ` : '';
+      return `${entry.itemName} - ${authorPrefix}${entry.text}`;
+    }));
+    lines.push('');
+  }
+
+  if (notification?.changes?.addedComments?.length) {
+    lines.push('Comments added:');
+    lines.push(...formatBoardActivityListLines(notification.changes.addedComments, (entry) => {
+      const authorPrefix = entry.author ? `${entry.author}: ` : '';
+      return `${entry.itemName} - ${authorPrefix}${entry.text}`;
+    }));
+    lines.push('');
+  }
+
+  lines.push(`View board: ${notification.boardUrl || ''}`);
+  return lines.join('\n');
+}
+
+function formatBoardActivityEmailHtml(notification = {}) {
+  const boardName = escapeHtml(notification?.board?.name || 'Untitled board');
+  const actorName = escapeHtml(notification?.actor?.displayName || notification?.actor?.email || 'Someone');
+  const sections = [`<p>${actorName} updated <strong>${boardName}</strong> on ShopBoard.</p>`];
+
+  const renderList = (title, entries, formatter) => {
+    if (!entries.length) return;
+    const items = formatBoardActivityListLines(entries, formatter)
+      .map((line) => `<li>${escapeHtml(line.replace(/^- /, ''))}</li>`)
+      .join('');
+    sections.push(`<p><strong>${escapeHtml(title)}</strong></p><ul>${items}</ul>`);
+  };
+
+  renderList('Items added', notification?.changes?.addedItems || [], (entry) => entry.itemName);
+  renderList('Feedback added', notification?.changes?.addedFeedbacks || [], (entry) => {
+    const authorPrefix = entry.author ? `${entry.author}: ` : '';
+    return `${entry.itemName} - ${authorPrefix}${entry.text}`;
+  });
+  renderList('Comments added', notification?.changes?.addedComments || [], (entry) => {
+    const authorPrefix = entry.author ? `${entry.author}: ` : '';
+    return `${entry.itemName} - ${authorPrefix}${entry.text}`;
+  });
+
+  if (notification.boardUrl) {
+    sections.push(`<p><a href="${escapeHtml(notification.boardUrl)}">View board</a></p>`);
+  }
+
+  return sections.join('');
+}
+
+async function sendBoardActivityEmail(notification = {}) {
+  if (!RESEND_API_KEY) {
+    return { skipped: true, reason: 'missing-resend-api-key' };
+  }
+
+  const recipientEmail = normalizeEmailAddress(notification?.recipient?.email || '');
+  if (!recipientEmail) {
+    return { skipped: true, reason: 'missing-recipient-email' };
+  }
+
+  const actorName = normalizeBoardActivityText(notification?.actor?.displayName || notification?.actor?.email || 'Someone', 120) || 'Someone';
+  const boardName = normalizeBoardActivityText(notification?.board?.name || 'Untitled board', 160) || 'Untitled board';
+
+  let response;
+  try {
+    response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json'
+      },
+      body: JSON.stringify({
+        from: BOARD_ACTIVITY_EMAIL_FROM,
+        to: [recipientEmail],
+        subject: `${actorName} updated ${boardName}`,
+        text: formatBoardActivityEmailText(notification),
+        html: formatBoardActivityEmailHtml(notification)
+      })
+    });
+  } catch (error) {
+    console.error('Board activity email request failed:', error);
+    throw createHttpError('Board activity email could not be sent right now.', 502);
+  }
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    console.error('Board activity email delivery failed:', {
+      status: response.status,
+      detail: detail.slice(0, 500)
+    });
+    throw createHttpError('Board activity email could not be sent right now.', 502);
+  }
+
+  return { ok: true };
 }
 
 function rowToCategory(row) {
@@ -1026,6 +1518,124 @@ function readPublicUserByEmail(db, email) {
     LIMIT 1
   `).get(normalizedEmail);
   return rowToPublicUser(row);
+}
+
+function resolveAppOrigin(req) {
+  if (APP_ORIGIN) return APP_ORIGIN;
+  const host = String(req?.headers?.host || '').trim();
+  if (!host) return 'http://localhost:3000';
+  const forwardedProto = String(req?.headers?.['x-forwarded-proto'] || '').trim();
+  const protocol = forwardedProto || (host.startsWith('localhost') || host.startsWith('127.0.0.1') ? 'http' : 'https');
+  return `${protocol}://${host}`;
+}
+
+function buildBoardUrl(req, boardId, ownerUserId = '') {
+  const normalizedBoardId = String(boardId || '').trim();
+  if (!normalizedBoardId) return resolveAppOrigin(req);
+  const url = new URL('/', `${resolveAppOrigin(req)}/`);
+  url.searchParams.set('board', normalizedBoardId);
+  if (String(ownerUserId || '').trim()) {
+    url.searchParams.set('owner', String(ownerUserId).trim());
+  }
+  return url.toString();
+}
+
+function upsertSharedBoardParticipant(db, boardId, ownerUserId, userId) {
+  const normalizedBoardId = String(boardId || '').trim();
+  const normalizedOwnerId = String(ownerUserId || '').trim();
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedBoardId || !normalizedOwnerId || !normalizedUserId) return false;
+  if (normalizedOwnerId === normalizedUserId) return false;
+  db.prepare(`
+    INSERT INTO shared_board_participants (board_id, owner_user_id, user_id, first_accessed_at, last_accessed_at)
+    VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    ON CONFLICT(board_id, owner_user_id, user_id) DO UPDATE SET
+      last_accessed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+  `).run(normalizedBoardId, normalizedOwnerId, normalizedUserId);
+  return true;
+}
+
+function listSharedBoardParticipantUsers(db, boardId, ownerUserId) {
+  const normalizedBoardId = String(boardId || '').trim();
+  const normalizedOwnerId = String(ownerUserId || '').trim();
+  if (!normalizedBoardId || !normalizedOwnerId) return [];
+  const rows = db.prepare(`
+    SELECT
+      u.id,
+      u.email,
+      u.display_name,
+      u.has_seen_beta_welcome,
+      u.beta_access_acknowledged_at,
+      u.has_seen_first_link_notice,
+      u.first_link_notice_eligible,
+      u.first_link_notice_triggered_at,
+      u.has_seeded_demo_board,
+      u.demo_board_seeded_at,
+      u.created_at,
+      u.updated_at
+    FROM shared_board_participants p
+    JOIN users u ON u.id = p.user_id
+    WHERE p.board_id = ? AND p.owner_user_id = ?
+    ORDER BY p.last_accessed_at DESC
+  `).all(normalizedBoardId, normalizedOwnerId);
+  return rows.map((row) => rowToPublicUser(row)).filter(Boolean);
+}
+
+async function notifyBoardActivityRecipients({
+  db,
+  req,
+  notificationSender,
+  actorUser,
+  ownerUserId,
+  previousBoard,
+  nextBoard
+}) {
+  const boardId = String(nextBoard?.id || previousBoard?.id || '').trim();
+  const normalizedOwnerId = String(ownerUserId || '').trim();
+  if (!actorUser || !boardId || !normalizedOwnerId) return;
+
+  const changes = summarizeBoardActivityChanges(previousBoard, nextBoard);
+  if (!changes.hasChanges) return;
+
+  const recipientsById = new Map();
+  const ownerUser = readPublicUserById(db, normalizedOwnerId);
+  if (ownerUser?.id) {
+    recipientsById.set(ownerUser.id, ownerUser);
+  }
+  for (const participant of listSharedBoardParticipantUsers(db, boardId, normalizedOwnerId)) {
+    if (participant?.id) {
+      recipientsById.set(participant.id, participant);
+    }
+  }
+  recipientsById.delete(String(actorUser.id || '').trim());
+
+  if (!recipientsById.size) return;
+
+  const boardUrl = buildBoardUrl(req, boardId, normalizedOwnerId);
+  const notificationJobs = [];
+  for (const recipient of recipientsById.values()) {
+    notificationJobs.push(
+      notificationSender({
+        recipient,
+        actor: actorUser,
+        owner: ownerUser,
+        board: {
+          id: boardId,
+          name: String(nextBoard?.name || previousBoard?.name || '').trim()
+        },
+        changes,
+        boardUrl
+      }).catch((error) => {
+        console.warn('Could not send board activity notification:', {
+          boardId,
+          ownerUserId: normalizedOwnerId,
+          recipientUserId: recipient?.id || '',
+          error: error instanceof Error ? error.message : String(error || '')
+        });
+      })
+    );
+  }
+  await Promise.all(notificationJobs);
 }
 
 function normalizeBoardNameForMatch(value) {
@@ -3271,7 +3881,7 @@ function scorePriceContext(context) {
   const text = String(context || '').toLowerCase();
   let score = 0;
   if (/(current price|sale price|our price|now\s*[:=]|deal price|today(?:'s)? price|final price|price to pay|add to cart)/.test(text)) score += 34;
-  if (/(price|sale|deal|offer|discount|off\b|save\b)/.test(text)) score += 14;
+  if (/(price|sale|deal|offer)/.test(text)) score += 14;
   if (/(list price|original price|regular price|was\s*\$|msrp|compare at|strike(?:through)?|crossed[- ]out)/.test(text)) score -= 34;
   if (/(afterpay|klarna|affirm|installments?|payments?|per month|apr|financing)/.test(text)) score -= 58;
   if (/(rewards?|service|installation|shipping|delivery|protection plan|warranty|membership)/.test(text)) score -= 24;
@@ -3319,8 +3929,10 @@ function extractPriceCandidatesFromHtml(html) {
     let localBoost = 0;
     if (/(price now|now[:\s]|current|our price|sale)/.test(left)) localBoost += 34;
     if (/(was|list|regular|original|msrp)/.test(left)) localBoost -= 34;
+    if (/(save|savings|you save|rebate|discount)\s*$/.test(left)) localBoost -= 72;
     if (/(in\s+\d+\s+payments?|\/mo|per month|apr)/.test(right)) localBoost -= 56;
-    if (/(off\b|save\b)/.test(right)) localBoost += 10;
+    if (/\b(?:rebate|savings?)\b/.test(right)) localBoost -= 42;
+    if (/\(?\s*[0-9]{1,3}%\s*off\b/.test(right)) localBoost -= 48;
     addPriceCandidate(out, {
       raw: moneyMatch[0],
       baseScore: 44 + localBoost,
@@ -3523,8 +4135,9 @@ function chooseBestPriceCandidate(candidates) {
   }
   return [...deduped.values()].sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
+    if (a.index !== b.index) return a.index - b.index;
     if (Number.isFinite(a.amount) && Number.isFinite(b.amount) && a.amount !== b.amount) return a.amount - b.amount;
-    return a.index - b.index;
+    return 0;
   })[0] || null;
 }
 
@@ -6914,14 +7527,85 @@ async function serveStatic(req, res) {
   }
 
   try {
-    const data = await fs.readFile(filePath);
+    const stats = await fs.stat(filePath);
+    if (!stats.isFile()) {
+      res.writeHead(404);
+      res.end('Not found');
+      return;
+    }
     const ext = path.extname(filePath);
     const type = MIME_TYPES[ext] || 'application/octet-stream';
-    res.writeHead(200, {
+    const baseHeaders = {
       'Content-Type': type,
-      'Cache-Control': 'no-store'
+      'Cache-Control': 'no-store',
+      'Accept-Ranges': 'bytes'
+    };
+    const fileSize = stats.size;
+    const rangeHeader = String(req.headers.range || '').trim();
+    const rangeMatch = rangeHeader.match(/^bytes=(\d*)-(\d*)$/i);
+    if (rangeMatch) {
+      const startRaw = rangeMatch[1];
+      const endRaw = rangeMatch[2];
+      let start = startRaw ? Number.parseInt(startRaw, 10) : NaN;
+      let end = endRaw ? Number.parseInt(endRaw, 10) : NaN;
+
+      if (!startRaw) {
+        const suffixLength = Number.parseInt(endRaw, 10);
+        if (!Number.isInteger(suffixLength) || suffixLength <= 0) {
+          res.writeHead(416, {
+            ...baseHeaders,
+            'Content-Range': `bytes */${fileSize}`
+          });
+          res.end();
+          return;
+        }
+        start = Math.max(fileSize - suffixLength, 0);
+        end = Math.max(fileSize - 1, 0);
+      } else {
+        if (!Number.isInteger(start) || start < 0 || start >= fileSize) {
+          res.writeHead(416, {
+            ...baseHeaders,
+            'Content-Range': `bytes */${fileSize}`
+          });
+          res.end();
+          return;
+        }
+        if (!endRaw || !Number.isInteger(end) || end >= fileSize) {
+          end = Math.max(fileSize - 1, 0);
+        }
+      }
+
+      if (!Number.isInteger(start) || !Number.isInteger(end) || end < start) {
+        res.writeHead(416, {
+          ...baseHeaders,
+          'Content-Range': `bytes */${fileSize}`
+        });
+        res.end();
+        return;
+      }
+
+      res.writeHead(206, {
+        ...baseHeaders,
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Content-Length': String(end - start + 1)
+      });
+      if ((req.method || 'GET').toUpperCase() === 'HEAD') {
+        res.end();
+        return;
+      }
+      fsSync.createReadStream(filePath, { start, end }).pipe(res);
+      return;
+    }
+
+    res.writeHead(200, {
+      ...baseHeaders,
+      'Content-Length': String(fileSize)
     });
-    res.end(data);
+    if ((req.method || 'GET').toUpperCase() === 'HEAD') {
+      res.end();
+      return;
+    }
+    fsSync.createReadStream(filePath).pipe(res);
   } catch {
     res.writeHead(404);
     res.end('Not found');
@@ -7462,7 +8146,11 @@ async function handleExtract(req, res) {
   }
 }
 
-export function createServer({ databasePath = dbPath, feedbackSender = sendSiteFeedbackEmail } = {}) {
+export function createServer({
+  databasePath = dbPath,
+  feedbackSender = sendSiteFeedbackEmail,
+  boardNotificationSender = sendBoardActivityEmail
+} = {}) {
   const db = openDatabase(databasePath);
   const dataService = createBoardDataService(db);
   const shouldSkipDemoBoardProvisioning = (options = {}) => {
@@ -7477,6 +8165,83 @@ export function createServer({ databasePath = dbPath, feedbackSender = sendSiteF
     const pathname = parsedUrl.pathname;
 
     try {
+      if (pathname === '/api/interview-projects' && method === 'POST') {
+        const project = createInterviewProjectRecord(db);
+        respondJson(res, 201, {
+          project,
+          sharePath: `/?project=${encodeURIComponent(project.id)}`
+        });
+        return;
+      }
+
+      const interviewProjectAudioMatch = pathname.match(/^\/api\/interview-projects\/([^/]+)\/audio$/);
+      if (interviewProjectAudioMatch) {
+        const projectId = decodeURIComponent(interviewProjectAudioMatch[1] || '').trim();
+        if (!projectId) {
+          respondJson(res, 400, { error: 'Invalid project id.' });
+          return;
+        }
+
+        if (method === 'PUT') {
+          const body = await readBinaryBody(req, 150_000_000);
+          if (!body.length) {
+            respondJson(res, 400, { error: 'Audio payload is required.' });
+            return;
+          }
+          writeInterviewProjectAudio(
+            db,
+            projectId,
+            body,
+            parsedUrl.searchParams.get('filename') || 'audio',
+            req.headers['content-type']
+          );
+          respondJson(res, 200, { ok: true });
+          return;
+        }
+
+        if (method === 'GET' || method === 'HEAD') {
+          const audioAsset = readInterviewProjectAudio(db, projectId);
+          if (!audioAsset) {
+            respondJson(res, 404, { error: 'Project audio was not found.' });
+            return;
+          }
+          respondBuffer(req, res, audioAsset.buffer, audioAsset.mimeType);
+          return;
+        }
+      }
+
+      const interviewProjectMatch = pathname.match(/^\/api\/interview-projects\/([^/]+)$/);
+      if (interviewProjectMatch) {
+        const projectId = decodeURIComponent(interviewProjectMatch[1] || '').trim();
+        if (!projectId) {
+          respondJson(res, 400, { error: 'Invalid project id.' });
+          return;
+        }
+
+        if (method === 'GET') {
+          const project = readInterviewProjectRecord(db, projectId);
+          if (!project) {
+            respondJson(res, 404, { error: 'Shared project not found.' });
+            return;
+          }
+          respondJson(res, 200, {
+            project,
+            sharePath: `/?project=${encodeURIComponent(project.id)}`
+          });
+          return;
+        }
+
+        if (method === 'PUT') {
+          const body = await readJsonBody(req, 10_000_000);
+          const project = writeInterviewProjectPayload(db, projectId, body);
+          respondJson(res, 200, {
+            project,
+            sharePath: `/?project=${encodeURIComponent(project.id)}`
+          });
+          return;
+        }
+      }
+
       if (pathname === '/api/feedback' && method === 'POST') {
         const authContext = lookupAuthContext(db, req);
         if (!authContext.authenticated && authContext.sessionToken) {
@@ -7736,6 +8501,10 @@ export function createServer({ databasePath = dbPath, feedbackSender = sendSiteF
           respondJson(res, 404, { error: 'Shared board not found.' });
           return;
         }
+        const authContext = lookupAuthContext(db, req);
+        if (authContext.authenticated && authContext.user && sharedBoardRecord.ownerId && authContext.user.id !== sharedBoardRecord.ownerId) {
+          upsertSharedBoardParticipant(db, sharedBoardRecord.board.id, sharedBoardRecord.ownerId, authContext.user.id);
+        }
         respondJson(res, 200, {
           board: sharedBoardRecord.board,
           ownerId: sharedBoardRecord.ownerId
@@ -7760,6 +8529,9 @@ export function createServer({ databasePath = dbPath, feedbackSender = sendSiteF
           const requestedSharedBoardOwnerId = String(requestedSharedBoardRecord?.ownerId || '').trim();
           const authContext = lookupAuthContext(db, req);
           if (authContext.authenticated && authContext.user) {
+            if (requestedSharedBoard && requestedSharedBoardOwnerId && authContext.user.id !== requestedSharedBoardOwnerId) {
+              upsertSharedBoardParticipant(db, requestedSharedBoard.id, requestedSharedBoardOwnerId, authContext.user.id);
+            }
             if (!shouldSkipDemoBoardProvisioning({ sharedBoardId: requestedSharedBoardId })) {
               try {
                 provisionDemoBoardForUser(db, authContext.user.id);
@@ -7822,12 +8594,23 @@ export function createServer({ databasePath = dbPath, feedbackSender = sendSiteF
               return;
             }
             const ownerSnapshot = readUserSnapshot(db, requestedSharedOwnerId);
+            const previousBoard = findBoardInSnapshot(ownerSnapshot, requestedSharedBoardId);
             const replaced = replaceBoardInSnapshot(ownerSnapshot, incomingBoard);
             if (!replaced.replaced) {
               respondJson(res, 404, { error: 'Shared board was not found on owner account.' });
               return;
             }
+            upsertSharedBoardParticipant(db, requestedSharedBoardId, requestedSharedOwnerId, user.id);
             writeUserSnapshot(db, requestedSharedOwnerId, replaced.snapshot);
+            await notifyBoardActivityRecipients({
+              db,
+              req,
+              notificationSender: boardNotificationSender,
+              actorUser: user,
+              ownerUserId: requestedSharedOwnerId,
+              previousBoard,
+              nextBoard: incomingBoard
+            });
             respondJson(res, 200, {
               ok: true,
               mode: 'shared-board',
@@ -7837,7 +8620,28 @@ export function createServer({ databasePath = dbPath, feedbackSender = sendSiteF
             return;
           }
           assertTemplateSnapshotWriteAccess(db, user, body);
+          const previousSnapshot = readUserSnapshot(db, user.id);
+          const nextSnapshot = normalizeAppDataSnapshot(body);
           writeUserSnapshot(db, user.id, body);
+          const previousBoardsById = new Map(
+            (Array.isArray(previousSnapshot?.boards) ? previousSnapshot.boards : [])
+              .map((board) => [String(board?.id || '').trim(), board])
+              .filter(([boardId]) => Boolean(boardId))
+          );
+          const nextBoards = Array.isArray(nextSnapshot?.boards) ? nextSnapshot.boards : [];
+          for (const nextBoard of nextBoards) {
+            const boardId = String(nextBoard?.id || '').trim();
+            if (!boardId) continue;
+            await notifyBoardActivityRecipients({
+              db,
+              req,
+              notificationSender: boardNotificationSender,
+              actorUser: user,
+              ownerUserId: user.id,
+              previousBoard: previousBoardsById.get(boardId) || null,
+              nextBoard
+            });
+          }
           respondJson(res, 200, { ok: true });
           return;
         }
@@ -7935,7 +8739,7 @@ export function createServer({ databasePath = dbPath, feedbackSender = sendSiteF
         return;
       }
 
-      if (method === 'GET') {
+      if (method === 'GET' || method === 'HEAD') {
         await serveStatic(req, res);
         return;
       }
