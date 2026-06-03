@@ -4821,6 +4821,7 @@ function isLikelyBlockedFallbackContent(text = '') {
 
 function shouldRejectSparseRetailerProduct(product, sourceUrl = '') {
   if (!isHomeDepotUrl(sourceUrl) && !isLowesUrl(sourceUrl)) return false;
+  if (product?.allowSparseRetailerFallback) return false;
   const hasImages = Boolean(product?.image) || (Array.isArray(product?.images) && product.images.length > 0);
   const hasPrice = Boolean(normalizePrice(product?.price || ''));
   return !hasImages && !hasPrice;
@@ -7476,10 +7477,11 @@ async function enrichProductData(targetUrl, baseProduct) {
 
     if (hasStrongRetailerResult(product)) return product;
     if (zyteError && shouldRejectSparseRetailerProduct(product, targetUrl)) {
-      throw new ExtractError(
-        `Enhanced extraction unavailable for this retailer right now (${zyteError.message}).`,
-        422
-      );
+      return {
+        ...product,
+        allowSparseRetailerFallback: true,
+        extractionWarning: `Enhanced extraction unavailable for this retailer right now (${zyteError.message}).`
+      };
     }
     return product;
   }

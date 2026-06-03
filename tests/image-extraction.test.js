@@ -144,6 +144,14 @@ test('sparse Home Depot product is rejected when both image and price are missin
   assert.equal(keep, false);
 });
 
+test('sparse Home Depot product can be allowed after enhanced extraction fails', () => {
+  const keep = __testOnlyShouldRejectSparseRetailerProduct(
+    { image: '', images: [], price: '', allowSparseRetailerFallback: true },
+    'https://www.homedepot.com/p/demo-product/123'
+  );
+  assert.equal(keep, false);
+});
+
 test('looksLikeProductImage excludes Home Depot payment/contentgrid assets', () => {
   const baseUrl = 'https://www.homedepot.com/p/demo-product/123';
   const html = `
