@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   __testOnlyParseJsonLd,
   __testOnlyPickBestProductPrice,
+  __testOnlyChooseZyteProductPrice,
   __testOnlyCollectImageCandidatesFromHtml,
   __testOnlyPickCompactItemName,
   __testOnlyPickFinalItemName,
@@ -107,6 +108,16 @@ test('PC Richard price picker prefers the main displayed price over savings text
 
   const price = __testOnlyPickBestProductPrice(sourceUrl, html);
   assert.equal(price, '$1,398.97');
+});
+
+test('Lowe’s Zyte product price ignores dimension-like sink amounts when browser price is stronger', () => {
+  const price = __testOnlyChooseZyteProductPrice({
+    finalUrl: 'https://www.lowes.com/pd/Kraus-KRAUS-Bellucci-8482-Workstation-30-in-Undermount-Granite-Composite-Single-Bowl-Kitchen-Sink-in-Metallic-Gray-with-Accessories/5001563709',
+    productTitleRaw: 'Kraus Bellucci Undermount 29-in x 19-in Composite Single bowl Workstation Kitchen Sink',
+    priceRaw: '29.0',
+    browserPrice: '$479.95'
+  });
+  assert.equal(price, '$479.95');
 });
 
 test('IKEA price picker prefers the main product price over later recommendation prices', () => {

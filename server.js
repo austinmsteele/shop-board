@@ -7357,11 +7357,14 @@ async function extractViaZyte(targetUrl) {
     productTitle: productTitleRaw
   });
 
-  const priceRaw = product?.price || product?.regularPrice || '';
-  const currency = product?.currencyRaw || product?.currency || '';
-  const price = priceRaw
-    ? `${currency ? `${currency} ` : ''}${priceRaw}`.trim()
-    : browserPrice;
+  const price = chooseZyteProductPrice({
+    finalUrl,
+    productTitleRaw,
+    baseName: base.name,
+    priceRaw: product?.price || product?.regularPrice || '',
+    currency: product?.currencyRaw || product?.currency || '',
+    browserPrice
+  });
 
   const specTexts = [
     ...(Array.isArray(product?.specifications) ? product.specifications.map(specToText) : []),
@@ -7401,6 +7404,39 @@ async function extractViaZyte(targetUrl) {
     ,
     detailSections: []
   };
+}
+
+function chooseZyteProductPrice({
+  finalUrl = '',
+  productTitleRaw = '',
+  baseName = '',
+  priceRaw = '',
+  currency = '',
+  browserPrice = ''
+} = {}) {
+  const productPrice = priceRaw
+    ? normalizePrice(`${currency ? `${currency} ` : ''}${priceRaw}`.trim())
+    : '';
+  const normalizedBrowserPrice = normalizePrice(browserPrice);
+  if (
+    isLowesUrl(finalUrl) &&
+    productPrice &&
+    normalizedBrowserPrice &&
+    /(?:sink|vanity|appliance|faucet|toilet|cabinet|countertop)/i.test(`${productTitleRaw} ${baseName}`)
+  ) {
+    const productAmount = parseAmountFromNormalizedPrice(productPrice);
+    const browserAmount = parseAmountFromNormalizedPrice(normalizedBrowserPrice);
+    if (
+      Number.isFinite(productAmount) &&
+      Number.isFinite(browserAmount) &&
+      productAmount > 0 &&
+      productAmount < 75 &&
+      browserAmount >= productAmount * 3
+    ) {
+      return normalizedBrowserPrice;
+    }
+  }
+  return productPrice || normalizedBrowserPrice;
 }
 
 async function extractViaJinaAi(targetUrl) {
@@ -7451,8 +7487,11 @@ async function enrichProductData(targetUrl, baseProduct) {
 
   if (isRetailerHighFidelityPreferred(targetUrl)) {
     let zyteError = null;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
+        if (attempt > 0) {
+          await delay(700 * attempt);
+        }
         const candidate = await extractViaZyte(targetUrl);
         product = mergeProducts(product, candidate, targetUrl);
         if (hasStrongRetailerResult(product) || !needsEnrichment(product)) {
@@ -7498,6 +7537,10 @@ async function enrichProductData(targetUrl, baseProduct) {
   }
 
   return product;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function extractProductData(targetUrl) {
@@ -8051,6 +8094,10 @@ export function __testOnlyPickBestProductPrice(finalUrl, html) {
     pageTitle
   });
   return pickBestProductPrice({ finalUrl, html, meta, jsonLd });
+}
+
+export function __testOnlyChooseZyteProductPrice(payload = {}) {
+  return chooseZyteProductPrice(payload);
 }
 
 export function __testOnlyUpsertDemoTemplateFromSourceBoard(databasePath, options = {}) {
